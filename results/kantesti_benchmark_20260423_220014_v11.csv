@@ -1,0 +1,16 @@
+case_id,title,category,status,composite_score,structural_score,clinical_score,elapsed_sec,sections_hit,subsections_hit,keywords_hit,scoring_systems_hit,probabilities_sum,probabilities_valid,hyperdiagnosis_hits,engine_path
+BT-001-IDA,Iron Deficiency Anemia — 34F,Hematology,ok,1.0,1.0,1.0,17.8,7/7,16/16,4/4,1/1,100.0,True,,primary
+BT-006-B12,Vitamin B12 Deficiency / Megaloblastic Anemia — 68F,Hematology,ok,1.0,1.0,1.0,18.4,7/7,16/16,4/4,0/0,100.0,True,,primary
+BT-007-THAL,β-Thalassemia Minor — 28M,Hematology,ok,1.0,1.0,1.0,17.0,7/7,16/16,4/4,1/1,100.0,True,,primary
+BT-002-HASH,Hashimoto's Thyroiditis — 42F,Endocrinology,ok,0.95,1.0,1.0,37.0,7/7,16/16,5/5,0/0,100.0,True,,fallback
+BT-008-PCOS,PCOS with Insulin Resistance — 26F,Endocrinology,ok,0.987,0.963,1.0,18.6,7/7,15/16,4/4,1/1,100.0,True,,primary
+BT-003-T2DM,T2DM + Metabolic Syndrome — 51M,Metabolic,ok,1.0,1.0,1.0,19.1,7/7,16/16,4/4,2/2,100.0,True,,primary
+BT-013-GOUT,Hyperuricemia with Gout Risk — 48M,Metabolic,ok,1.0,1.0,1.0,19.4,7/7,16/16,3/3,0/0,100.0,True,,primary
+BT-004-NAFLD,NAFLD / NASH — 46M,Hepatology,ok,1.0,1.0,1.0,19.6,7/7,16/16,3/3,2/2,100.0,True,,primary
+BT-009-VIRHEP,Acute Viral Hepatitis — 22M,Hepatology,ok,0.95,1.0,1.0,23.4,7/7,16/16,4/4,1/1,100.0,True,,fallback
+BT-014-GILBERT,Gilbert's Syndrome — Isolated Unconjugated Hyperbilirubinemia [Trap] — 24M,Trap,ok,1.0,1.0,1.0,18.9,7/7,16/16,3/3,0/0,100.0,True,,primary
+BT-005-CKD,CKD Stage 3 — 62M,Nephrology,ok,1.0,1.0,1.0,17.4,7/7,16/16,3/3,1/1,100.0,True,,primary
+BT-010-ASCVD,High Cardiovascular Risk — Atherogenic Dyslipidemia — 58M,Cardiology,ok,1.0,1.0,1.0,19.7,7/7,16/16,4/4,1/1,100.0,True,,primary
+BT-011-SLE,Systemic Lupus Erythematosus — 31F,Rheumatology,ok,0.981,1.0,0.965,18.2,7/7,16/16,5/5,2/2,100.0,True,,primary
+BT-012-VITD,Severe Vitamin D Deficiency + Secondary Hyperparathyroidism — 55F,Endocrinology,ok,1.0,1.0,1.0,19.3,7/7,16/16,4/4,0/0,100.0,True,,primary
+BT-015-HEALTHY,Healthy Adult — Routine Screening [Trap] — 35F,Trap,ok,1.0,1.0,1.0,18.7,7/7,16/16,4/4,0/0,100.0,True,,fallback
