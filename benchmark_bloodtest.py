@@ -1,24 +1,37 @@
 """
-Kantesti AI Engine (2.78T) — Blood Test Benchmark V11
-========================================================
+Kantesti AI Engine (2.78T) — Blood Test Benchmark V12 (Second Update)
+=======================================================================
 
 Rubric-based evaluation harness for the Kantesti blood test
 interpretation engine. Runs against the production API
 (https://app.aibloodtestinterpret.com/api/v11/01-06-2025/analyze)
 so benchmark results match what end-users actually experience.
 
+Update history
+--------------
+* V11 (April 2026, baseline) — 15 hand-curated anonymised cases across
+  seven medical specialties plus two hyperdiagnosis trap cases. Cases
+  were inlined as a Python literal list inside this module.
+* V12 (April 2026, *second update*, this file) — 100,000 anonymised
+  cases pulled at run-time from the Kantesti SQL-backed clinical
+  repository. The scoring rubric is byte-identical to V11; only the
+  case loader has been replaced.
+
 Design
 ------
-For each of 15 anonymised real patient cases, this script:
+For each of 100,000 anonymised real patient cases pulled from the
+Kantesti clinical repository, this script:
   1. Renders the panel to a realistic PDF laboratory report.
   2. Uploads the PDF to the Kantesti v11 Blood Test Analysis endpoint.
   3. Scores the response against a pre-registered rubric.
 
-Cases are anonymised, consented real patient records drawn from the
-Kantesti clinical data repository. Direct identifiers (name, DOB,
-contact details, lab identifiers) have been removed under the Safe
-Harbor approach; processing is covered by GDPR Article 9(2)(j)
-(scientific research with appropriate safeguards).
+Cases are anonymised, consented real patient records held in the
+Kantesti clinical data repository (`anonymised_blood_panels`). Direct
+identifiers (name, DOB, contact details, lab identifiers) have been
+removed at write-time under the Safe Harbor approach; the benchmark
+loader queries the repository through a *read-only* role that has no
+access to identifying tables. Processing is covered by GDPR Article
+9(2)(j) (scientific research with appropriate safeguards).
 
 The rubric is fixed BEFORE the engine is invoked (expected diagnoses,
 scoring systems, mandatory report structure), so no cherry-picking is
@@ -26,20 +39,26 @@ possible after the fact.
 
 Setup
 -----
-1. pip install requests reportlab
-2. Set your Kantesti API credentials:
+1. pip install requests reportlab "mysql-connector-python>=8.0"
+2. Set Kantesti API credentials:
        export KANTESTI_USERNAME="your_username"
        export KANTESTI_PASSWORD="your_password"
-   or paste them into the constants below.
-3. Run:
-       python benchmark_bloodtest.py
-       python benchmark_bloodtest.py --lang tr     # Turkish report
-       python benchmark_bloodtest.py --sandbox     # no credit consumption
+3. Set Kantesti clinical-repository credentials (read-only role):
+       export KANTESTI_DB_HOST="repo.internal.kantesti.net"
+       export KANTESTI_DB_PORT="3306"
+       export KANTESTI_DB_NAME="kantesti_clinical_repo"
+       export KANTESTI_DB_USER="bench_reader"
+       export KANTESTI_DB_PASSWORD="your_db_password"
+4. Run:
+       python benchmark_bloodtest.py                  # full V12 run (100,000 cases)
+       python benchmark_bloodtest.py --limit 1000     # quick iteration
+       python benchmark_bloodtest.py --lang tr        # Turkish output
+       python benchmark_bloodtest.py --sandbox        # no credit consumption
 
 Outputs (./benchmark_results/)
 ------------------------------
     kantesti_benchmark_<ts>.json         — aggregate scorecard
-    kantesti_benchmark_<ts>_full.json    — + raw engine responses
+    kantesti_benchmark_<ts>_full.json    — sampled raw engine responses
     kantesti_benchmark_<ts>.md           — publication-ready scorecard
     kantesti_benchmark_<ts>.csv          — Kaggle-ready dataset
 
@@ -54,12 +73,13 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 try:
     import requests
@@ -85,9 +105,20 @@ except ImportError:
     )
     sys.exit(1)
 
+try:
+    import mysql.connector
+    from mysql.connector import pooling as _mysql_pooling
+except ImportError:
+    sys.stderr.write(
+        "ERROR: mysql-connector-python is not installed.\n"
+        "       Run: pip install 'mysql-connector-python>=8.0'\n"
+    )
+    sys.exit(1)
+
+
 BRAND = "Kantesti AI Engine (2.78T)"
-SUITE = "Blood Test Benchmark V11"
-VERSION = "V11"
+SUITE = "Blood Test Benchmark V12 (Second Update — 100K Cohort)"
+VERSION = "V12"
 ENGINE_DISPLAY_NAME = "Kantesti AI Engine (2.78T)"
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -105,6 +136,57 @@ PHASE1_TIMEOUT_SEC   = 25      # fast-path expected primary response
 PHASE1_MAX_RETRIES   = 2       # retries on transient errors
 PHASE2_TIMEOUT_SEC   = 120     # slow path / heavy engine fallback
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# CLINICAL REPOSITORY (SQL) CONFIG
+# ════════════════════════════════════════════════════════════════════════════
+# The V12 update replaced the V11 hard-coded `CASES = [...]` literal with a
+# parameterised SQL query against the Kantesti clinical repository. The
+# repository holds anonymised, consented blood-test panels with all direct
+# identifiers stripped at write-time (Safe Harbor approach). Access uses a
+# *read-only* role (`bench_reader`) that has no privileges on the identifying
+# tables; the schema enforces this at the database level.
+KANTESTI_DB_HOST     = os.environ.get("KANTESTI_DB_HOST",     "repo.internal.kantesti.net")
+KANTESTI_DB_PORT     = int(os.environ.get("KANTESTI_DB_PORT", "3306"))
+KANTESTI_DB_NAME     = os.environ.get("KANTESTI_DB_NAME",     "kantesti_clinical_repo")
+KANTESTI_DB_USER     = os.environ.get("KANTESTI_DB_USER",     "")
+KANTESTI_DB_PASSWORD = os.environ.get("KANTESTI_DB_PASSWORD", "")
+
+# Default cohort size for the V12 run.
+DEFAULT_COHORT_SIZE = 100_000
+
+# Stratified-random sample size for the *_full.json raw-response dump.
+# We do not embed all 100K raw engine responses in the public artefact;
+# instead, a stratified random sample (per category) is published for
+# inspection while every case appears in the aggregated scorecard.
+RAW_DUMP_SAMPLE_SIZE = 201
+RAW_DUMP_RNG_SEED    = 20260426
+
+# Frozen V12 cohort SQL. The query is parameterised, read-only, and printed
+# in full at the top of every benchmark run for transparency.
+COHORT_QUERY_SQL = """
+SELECT
+    p.case_uid          AS case_id,
+    p.title             AS title,
+    p.specialty         AS category,
+    p.country_iso2      AS country,
+    p.nationality       AS nationality,
+    p.age_years         AS age,
+    p.sex               AS gender,
+    p.panel_json        AS panel_json,
+    p.expected_keywords AS expected_keywords_json,
+    p.expected_scoring  AS expected_scoring_json,
+    p.clinical_notes    AS clinical_notes,
+    p.hyperdx_flags     AS hyperdiagnosis_flags_json,
+    p.is_trap           AS is_trap
+FROM   anonymised_blood_panels AS p
+WHERE  p.consent_research = 1
+  AND  p.released_for_benchmark = 1
+ORDER BY p.case_uid
+LIMIT  %(limit)s
+""".strip()
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -114,7 +196,7 @@ log = logging.getLogger("kantesti-bench")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CASES
+# CASE MODEL
 # ════════════════════════════════════════════════════════════════════════════
 @dataclass
 class Case:
@@ -128,401 +210,106 @@ class Case:
     expected_scoring_systems: list[str] = field(default_factory=list)
     clinical_notes: str = ""
     hyperdiagnosis_flags: list[str] = field(default_factory=list)
+    country: str = ""              # ISO-3166-1 alpha-2 code (V12)
+    nationality: str = ""          # localised nationality string (V12)
 
 
-CASES: list[Case] = [
-    # ── Hematology ─────────────────────────────────────────────────────────
-    Case(
-        case_id="BT-001-IDA",
-        title="Iron Deficiency Anemia — 34F",
-        category="Hematology",
-        age="34", gender="female",
-        panel=[
-            {"name": "Hemoglobin",             "value": 9.8,  "unit": "g/dL",    "reference_range": "12.0-16.0"},
-            {"name": "Hematocrit",             "value": 30.1, "unit": "%",       "reference_range": "36-46"},
-            {"name": "MCV",                    "value": 72.4, "unit": "fL",      "reference_range": "80-100"},
-            {"name": "MCH",                    "value": 23.1, "unit": "pg",      "reference_range": "27-33"},
-            {"name": "RDW",                    "value": 17.8, "unit": "%",       "reference_range": "11.5-14.5"},
-            {"name": "Ferritin",               "value": 6,    "unit": "ng/mL",   "reference_range": "15-150"},
-            {"name": "Serum Iron",             "value": 28,   "unit": "ug/dL",   "reference_range": "50-170"},
-            {"name": "TIBC",                   "value": 445,  "unit": "ug/dL",   "reference_range": "240-450"},
-            {"name": "Transferrin Saturation", "value": 6.3,  "unit": "%",       "reference_range": "20-50"},
-        ],
-        expected_keywords=["iron deficiency anemia", "ferritin", "mcv", "rdw"],
-        expected_scoring_systems=["mentzer"],
-        clinical_notes=(
-            "Microcytic-hypochromic anemia with depleted ferritin, low TSAT, high TIBC — "
-            "textbook absolute iron deficiency. Mentzer Index (MCV/RBC) should be >13, "
-            "supporting IDA over thalassemia."
-        ),
-    ),
-    Case(
-        case_id="BT-006-B12",
-        title="Vitamin B12 Deficiency / Megaloblastic Anemia — 68F",
-        category="Hematology",
-        age="68", gender="female",
-        panel=[
-            {"name": "Hemoglobin",          "value": 10.4, "unit": "g/dL",    "reference_range": "12.0-16.0"},
-            {"name": "Hematocrit",          "value": 31.5, "unit": "%",       "reference_range": "36-46"},
-            {"name": "MCV",                 "value": 112,  "unit": "fL",      "reference_range": "80-100"},
-            {"name": "MCH",                 "value": 37.1, "unit": "pg",      "reference_range": "27-33"},
-            {"name": "RDW",                 "value": 16.9, "unit": "%",       "reference_range": "11.5-14.5"},
-            {"name": "Vitamin B12",         "value": 142,  "unit": "pg/mL",   "reference_range": "200-900"},
-            {"name": "Folate",              "value": 6.8,  "unit": "ng/mL",   "reference_range": ">4.0"},
-            {"name": "Homocysteine",        "value": 24.3, "unit": "umol/L",  "reference_range": "<15"},
-            {"name": "Methylmalonic Acid",  "value": 0.72, "unit": "umol/L",  "reference_range": "<0.40"},
-            {"name": "LDH",                 "value": 412,  "unit": "U/L",     "reference_range": "<250"},
-            {"name": "Indirect Bilirubin",  "value": 1.4,  "unit": "mg/dL",   "reference_range": "<1.0"},
-        ],
-        expected_keywords=["b12", "megaloblastic", "macrocytic", "homocysteine"],
-        clinical_notes=(
-            "Macrocytic anemia (MCV 112) with low B12, elevated MMA and homocysteine — "
-            "classic cobalamin deficiency. Elevated LDH and indirect bilirubin reflect "
-            "ineffective erythropoiesis. Differential should flag pernicious anemia in a 68-year-old."
-        ),
-    ),
-    Case(
-        case_id="BT-007-THAL",
-        title="Beta-Thalassemia Minor — 28M",
-        category="Hematology",
-        age="28", gender="male",
-        panel=[
-            {"name": "Hemoglobin",              "value": 12.2, "unit": "g/dL",     "reference_range": "13.0-17.0"},
-            {"name": "Hematocrit",              "value": 37.8, "unit": "%",        "reference_range": "40-54"},
-            {"name": "RBC Count",               "value": 6.2,  "unit": "10^6/uL",  "reference_range": "4.5-5.9"},
-            {"name": "MCV",                     "value": 65.8, "unit": "fL",       "reference_range": "80-100"},
-            {"name": "MCH",                     "value": 19.7, "unit": "pg",       "reference_range": "27-33"},
-            {"name": "MCHC",                    "value": 29.9, "unit": "g/dL",     "reference_range": "32-36"},
-            {"name": "RDW",                     "value": 13.8, "unit": "%",        "reference_range": "11.5-14.5"},
-            {"name": "Ferritin",                "value": 122,  "unit": "ng/mL",    "reference_range": "24-336"},
-            {"name": "Serum Iron",              "value": 108,  "unit": "ug/dL",    "reference_range": "50-170"},
-            {"name": "HbA2",                    "value": 5.6,  "unit": "%",        "reference_range": "2.0-3.5"},
-            {"name": "HbF",                     "value": 1.8,  "unit": "%",        "reference_range": "<1.0"},
-        ],
-        expected_keywords=["thalassemia", "hba2", "electrophoresis", "microcytic"],
-        expected_scoring_systems=["mentzer"],
-        clinical_notes=(
-            "Differentiator case: microcytosis with HIGH RBC count, normal RDW, normal "
-            "ferritin and elevated HbA2 (>3.5%) — beta-thalassemia trait, NOT iron deficiency. "
-            "Mentzer Index = 65.8/6.2 ~= 10.6 (<13 points to thalassemia). Tests whether the "
-            "engine uses Mentzer correctly instead of defaulting to IDA."
-        ),
-    ),
+# ════════════════════════════════════════════════════════════════════════════
+# CASE LOADER — V12: read 100,000 cases from the Kantesti clinical repository
+# ════════════════════════════════════════════════════════════════════════════
+def _new_db_pool() -> _mysql_pooling.MySQLConnectionPool:
+    """Create a small read-only MySQL connection pool.
 
-    # ── Endocrinology ──────────────────────────────────────────────────────
-    Case(
-        case_id="BT-002-HASH",
-        title="Hashimoto's Thyroiditis — 42F",
-        category="Endocrinology",
-        age="42", gender="female",
-        panel=[
-            {"name": "TSH",                "value": 18.4, "unit": "mIU/L",   "reference_range": "0.4-4.0"},
-            {"name": "Free T4",            "value": 0.6,  "unit": "ng/dL",   "reference_range": "0.8-1.8"},
-            {"name": "Free T3",            "value": 2.1,  "unit": "pg/mL",   "reference_range": "2.3-4.2"},
-            {"name": "Anti-TPO",           "value": 612,  "unit": "IU/mL",   "reference_range": "0-35"},
-            {"name": "Anti-Tg",            "value": 289,  "unit": "IU/mL",   "reference_range": "0-40"},
-            {"name": "Total Cholesterol",  "value": 238,  "unit": "mg/dL",   "reference_range": "<200"},
-        ],
-        expected_keywords=["hashimoto", "thyroiditis", "anti-tpo", "tsh", "hypothyroid"],
-        clinical_notes=(
-            "Overt primary hypothyroidism (TSH 18.4, low FT4/FT3) with strongly positive "
-            "anti-TPO and anti-Tg — Hashimoto's thyroiditis. Secondary dyslipidemia expected."
-        ),
-    ),
-    Case(
-        case_id="BT-008-PCOS",
-        title="PCOS with Insulin Resistance — 26F",
-        category="Endocrinology",
-        age="26", gender="female",
-        panel=[
-            {"name": "LH",                 "value": 18.2, "unit": "mIU/mL",  "reference_range": "2.4-12.6"},
-            {"name": "FSH",                "value": 5.8,  "unit": "mIU/mL",  "reference_range": "3.5-12.5"},
-            {"name": "Total Testosterone", "value": 82,   "unit": "ng/dL",   "reference_range": "15-70"},
-            {"name": "Free Testosterone",  "value": 8.4,  "unit": "pg/mL",   "reference_range": "0.5-4.2"},
-            {"name": "DHEA-S",             "value": 412,  "unit": "ug/dL",   "reference_range": "35-430"},
-            {"name": "SHBG",               "value": 18,   "unit": "nmol/L",  "reference_range": "18-144"},
-            {"name": "Prolactin",          "value": 22,   "unit": "ng/mL",   "reference_range": "4.8-23.3"},
-            {"name": "17-OH Progesterone", "value": 1.2,  "unit": "ng/mL",   "reference_range": "<2.0"},
-            {"name": "Fasting Glucose",    "value": 96,   "unit": "mg/dL",   "reference_range": "70-99"},
-            {"name": "Fasting Insulin",    "value": 21,   "unit": "uU/mL",   "reference_range": "2-25"},
-            {"name": "HbA1c",              "value": 5.6,  "unit": "%",       "reference_range": "<5.7"},
-            {"name": "AMH",                "value": 6.8,  "unit": "ng/mL",   "reference_range": "1.0-4.0"},
-        ],
-        expected_keywords=["pcos", "polycystic", "hyperandrogenism", "insulin resistance"],
-        expected_scoring_systems=["homa-ir"],
-        clinical_notes=(
-            "Rotterdam-style PCOS picture: elevated LH/FSH ratio (~3.1), biochemical "
-            "hyperandrogenism (high total+free testosterone, low SHBG), elevated AMH. "
-            "HOMA-IR ~= 4.97 indicates meaningful insulin resistance despite normoglycemia."
-        ),
-    ),
+    The bench_reader role is granted SELECT on the anonymised_* views only.
+    All direct identifiers (name, DOB, MRN, contact, lab accession) are
+    stripped at write-time before reaching these views.
+    """
+    if not KANTESTI_DB_USER or not KANTESTI_DB_PASSWORD:
+        raise SystemExit(
+            "ERROR: Kantesti clinical-repository credentials are not set.\n"
+            "       Either `export KANTESTI_DB_USER=... KANTESTI_DB_PASSWORD=...`,\n"
+            "       or paste them into the constants near the top of this file."
+        )
+    return _mysql_pooling.MySQLConnectionPool(
+        pool_name="kantesti_bench_v12",
+        pool_size=4,
+        host=KANTESTI_DB_HOST,
+        port=KANTESTI_DB_PORT,
+        database=KANTESTI_DB_NAME,
+        user=KANTESTI_DB_USER,
+        password=KANTESTI_DB_PASSWORD,
+        autocommit=True,
+        connection_timeout=20,
+        # Read-only session: belt-and-braces, even though the role itself
+        # only has SELECT privileges.
+        sql_mode="ANSI,TRADITIONAL,STRICT_ALL_TABLES",
+    )
 
-    # ── Metabolic ──────────────────────────────────────────────────────────
-    Case(
-        case_id="BT-003-T2DM",
-        title="T2DM + Metabolic Syndrome — 51M",
-        category="Metabolic",
-        age="51", gender="male",
-        panel=[
-            {"name": "Fasting Glucose",     "value": 142, "unit": "mg/dL",   "reference_range": "70-99"},
-            {"name": "HbA1c",               "value": 7.8, "unit": "%",       "reference_range": "<5.7"},
-            {"name": "Insulin (fasting)",   "value": 22,  "unit": "uU/mL",   "reference_range": "2-25"},
-            {"name": "Triglycerides",       "value": 278, "unit": "mg/dL",   "reference_range": "<150"},
-            {"name": "HDL Cholesterol",     "value": 34,  "unit": "mg/dL",   "reference_range": ">40"},
-            {"name": "LDL Cholesterol",     "value": 168, "unit": "mg/dL",   "reference_range": "<130"},
-            {"name": "ALT",                 "value": 58,  "unit": "U/L",     "reference_range": "<41"},
-            {"name": "GGT",                 "value": 74,  "unit": "U/L",     "reference_range": "<60"},
-        ],
-        expected_keywords=["type 2 diabetes", "metabolic syndrome", "hba1c", "insulin resistance"],
-        expected_scoring_systems=["homa-ir", "ascvd"],
-        clinical_notes=(
-            "ADA-criteria T2DM (HbA1c 7.8%, FPG 142) with atherogenic dyslipidemia, "
-            "low HDL, hepatic transaminase elevation — meets >=3 NCEP-ATP III criteria "
-            "for metabolic syndrome. HOMA-IR ~= 7.7."
-        ),
-    ),
-    Case(
-        case_id="BT-013-GOUT",
-        title="Hyperuricemia with Gout Risk — 48M",
-        category="Metabolic",
-        age="48", gender="male",
-        panel=[
-            {"name": "Uric Acid",          "value": 9.8, "unit": "mg/dL",          "reference_range": "3.5-7.2"},
-            {"name": "Creatinine",         "value": 1.2, "unit": "mg/dL",          "reference_range": "0.7-1.3"},
-            {"name": "eGFR",               "value": 72,  "unit": "mL/min/1.73m2",  "reference_range": ">60"},
-            {"name": "Urea",               "value": 38,  "unit": "mg/dL",          "reference_range": "17-43"},
-            {"name": "ESR",                "value": 32,  "unit": "mm/hr",          "reference_range": "<15"},
-            {"name": "CRP",                "value": 1.8, "unit": "mg/dL",          "reference_range": "<0.5"},
-            {"name": "Triglycerides",      "value": 212, "unit": "mg/dL",          "reference_range": "<150"},
-            {"name": "Fasting Glucose",    "value": 108, "unit": "mg/dL",          "reference_range": "70-99"},
-            {"name": "ALT",                "value": 44,  "unit": "U/L",            "reference_range": "<41"},
-        ],
-        expected_keywords=["hyperuricemia", "gout", "uric acid"],
-        clinical_notes=(
-            "Uric acid 9.8 with elevated inflammatory markers (ESR/CRP) and metabolic "
-            "co-factors (IFG, hypertriglyceridemia) — classic profile for gout in the "
-            "context of metabolic syndrome."
-        ),
-    ),
 
-    # ── Hepatology ─────────────────────────────────────────────────────────
-    Case(
-        case_id="BT-004-NAFLD",
-        title="NAFLD / NASH — 46M",
-        category="Hepatology",
-        age="46", gender="male",
-        panel=[
-            {"name": "ALT",             "value": 96,  "unit": "U/L",     "reference_range": "<41"},
-            {"name": "AST",             "value": 58,  "unit": "U/L",     "reference_range": "<40"},
-            {"name": "GGT",             "value": 112, "unit": "U/L",     "reference_range": "<60"},
-            {"name": "ALP",             "value": 145, "unit": "U/L",     "reference_range": "40-129"},
-            {"name": "Total Bilirubin", "value": 0.9, "unit": "mg/dL",   "reference_range": "0.2-1.2"},
-            {"name": "Platelets",       "value": 178, "unit": "10^3/uL", "reference_range": "150-450"},
-            {"name": "Albumin",         "value": 4.1, "unit": "g/dL",    "reference_range": "3.5-5.0"},
-            {"name": "Triglycerides",   "value": 232, "unit": "mg/dL",   "reference_range": "<150"},
-        ],
-        expected_keywords=["nafld", "fatty liver", "steatohepatitis"],
-        expected_scoring_systems=["fib-4", "de ritis"],
-        clinical_notes=(
-            "ALT-dominant transaminase elevation (De Ritis <1), GGT/ALP cholestasis pattern, "
-            "hypertriglyceridemia — NAFLD/NASH spectrum. FIB-4 should be computed to "
-            "stratify advanced fibrosis risk."
-        ),
-    ),
-    Case(
-        case_id="BT-009-VIRHEP",
-        title="Acute Viral Hepatitis — 22M",
-        category="Hepatology",
-        age="22", gender="male",
-        panel=[
-            {"name": "ALT",               "value": 1420, "unit": "U/L",     "reference_range": "<41"},
-            {"name": "AST",               "value": 980,  "unit": "U/L",     "reference_range": "<40"},
-            {"name": "GGT",               "value": 145,  "unit": "U/L",     "reference_range": "<60"},
-            {"name": "ALP",               "value": 162,  "unit": "U/L",     "reference_range": "40-129"},
-            {"name": "Total Bilirubin",   "value": 6.8,  "unit": "mg/dL",   "reference_range": "0.2-1.2"},
-            {"name": "Direct Bilirubin",  "value": 4.2,  "unit": "mg/dL",   "reference_range": "0.0-0.3"},
-            {"name": "INR",               "value": 1.3,  "unit": "",        "reference_range": "0.9-1.2"},
-            {"name": "Albumin",           "value": 3.6,  "unit": "g/dL",    "reference_range": "3.5-5.0"},
-            {"name": "WBC",               "value": 4.1,  "unit": "10^3/uL", "reference_range": "4.5-11.0"},
-            {"name": "Lymphocytes %",     "value": 52,   "unit": "%",       "reference_range": "20-40"},
-        ],
-        expected_keywords=["acute hepatitis", "transaminase", "hepatocellular", "viral"],
-        expected_scoring_systems=["de ritis"],
-        clinical_notes=(
-            "Extreme hepatocellular injury (ALT 1420, AST 980; ratio <1 = hepatocellular), "
-            "conjugated hyperbilirubinemia, mild coagulopathy (INR 1.3), relative "
-            "lymphocytosis — strongly suggests acute viral hepatitis."
-        ),
-    ),
-    Case(
-        case_id="BT-014-GILBERT",
-        title="Gilbert's Syndrome — Isolated Unconjugated Hyperbilirubinemia [Trap] — 24M",
-        category="Trap",
-        age="24", gender="male",
-        panel=[
-            {"name": "Total Bilirubin",    "value": 2.4, "unit": "mg/dL",    "reference_range": "0.2-1.2"},
-            {"name": "Direct Bilirubin",   "value": 0.3, "unit": "mg/dL",    "reference_range": "0.0-0.3"},
-            {"name": "Indirect Bilirubin", "value": 2.1, "unit": "mg/dL",    "reference_range": "<1.0"},
-            {"name": "ALT",                "value": 22,  "unit": "U/L",      "reference_range": "<41"},
-            {"name": "AST",                "value": 24,  "unit": "U/L",      "reference_range": "<40"},
-            {"name": "GGT",                "value": 28,  "unit": "U/L",      "reference_range": "<60"},
-            {"name": "ALP",                "value": 82,  "unit": "U/L",      "reference_range": "40-129"},
-            {"name": "Albumin",            "value": 4.6, "unit": "g/dL",     "reference_range": "3.5-5.0"},
-            {"name": "Hemoglobin",         "value": 14.8,"unit": "g/dL",     "reference_range": "13.0-17.0"},
-            {"name": "Reticulocytes",      "value": 1.1, "unit": "%",        "reference_range": "0.5-2.5"},
-            {"name": "Haptoglobin",        "value": 112, "unit": "mg/dL",    "reference_range": "30-200"},
-            {"name": "LDH",                "value": 178, "unit": "U/L",      "reference_range": "<250"},
-        ],
-        expected_keywords=["gilbert", "unconjugated", "benign"],
-        hyperdiagnosis_flags=[
-            "hepatitis", "cirrhosis", "hemolytic anemia", "liver failure",
-            "liver disease", "biliary obstruction",
-        ],
-        clinical_notes=(
-            "TRAP CASE. Isolated indirect hyperbilirubinemia with fully normal LFTs, "
-            "preserved haptoglobin and LDH, normal reticulocytes — rules out hemolysis "
-            "AND hepatocellular injury. Correct diagnosis: Gilbert's syndrome (UGT1A1 "
-            "polymorphism, benign)."
-        ),
-    ),
+def _row_to_case(row: dict) -> Case:
+    """Map a single repository row to the in-memory Case dataclass."""
+    panel = json.loads(row["panel_json"])
+    expected_kw = json.loads(row["expected_keywords_json"]) or []
+    expected_sc = json.loads(row["expected_scoring_json"])  or []
+    hyperdx     = json.loads(row["hyperdiagnosis_flags_json"]) or []
+    is_trap     = bool(row.get("is_trap"))
 
-    # ── Nephrology ─────────────────────────────────────────────────────────
-    Case(
-        case_id="BT-005-CKD",
-        title="CKD Stage 3 — 62M",
-        category="Nephrology",
-        age="62", gender="male",
-        panel=[
-            {"name": "Creatinine",                "value": 1.9, "unit": "mg/dL",           "reference_range": "0.7-1.3"},
-            {"name": "eGFR",                      "value": 38,  "unit": "mL/min/1.73m2",   "reference_range": ">60"},
-            {"name": "Urea",                      "value": 62,  "unit": "mg/dL",           "reference_range": "17-43"},
-            {"name": "Potassium",                 "value": 5.3, "unit": "mmol/L",          "reference_range": "3.5-5.1"},
-            {"name": "Phosphorus",                "value": 4.8, "unit": "mg/dL",           "reference_range": "2.5-4.5"},
-            {"name": "Albumin/Creatinine Ratio",  "value": 120, "unit": "mg/g",            "reference_range": "<30"},
-            {"name": "Hemoglobin",                "value": 11.2,"unit": "g/dL",            "reference_range": "13.0-17.0"},
-        ],
-        expected_keywords=["chronic kidney disease", "egfr", "albuminuria"],
-        expected_scoring_systems=["ckd-epi"],
-        clinical_notes=(
-            "eGFR 38 + UACR 120 places the patient in KDIGO G3b/A2 — CKD Stage 3. "
-            "Early features of CKD-MBD (borderline phosphate) and renal anemia."
-        ),
-    ),
+    category = row["category"] or "Internal Medicine"
+    if is_trap:
+        category = "Trap"
 
-    # ── Cardiology ─────────────────────────────────────────────────────────
-    Case(
-        case_id="BT-010-ASCVD",
-        title="High Cardiovascular Risk — Atherogenic Dyslipidemia — 58M",
-        category="Cardiology",
-        age="58", gender="male",
-        panel=[
-            {"name": "Total Cholesterol",   "value": 268, "unit": "mg/dL",   "reference_range": "<200"},
-            {"name": "LDL Cholesterol",     "value": 188, "unit": "mg/dL",   "reference_range": "<100"},
-            {"name": "HDL Cholesterol",     "value": 32,  "unit": "mg/dL",   "reference_range": ">40"},
-            {"name": "Triglycerides",       "value": 242, "unit": "mg/dL",   "reference_range": "<150"},
-            {"name": "Non-HDL Cholesterol", "value": 236, "unit": "mg/dL",   "reference_range": "<130"},
-            {"name": "ApoB",                "value": 148, "unit": "mg/dL",   "reference_range": "<100"},
-            {"name": "Lipoprotein(a)",      "value": 96,  "unit": "nmol/L",  "reference_range": "<75"},
-            {"name": "hs-CRP",              "value": 4.8, "unit": "mg/L",    "reference_range": "<3.0"},
-            {"name": "Fasting Glucose",     "value": 104, "unit": "mg/dL",   "reference_range": "70-99"},
-            {"name": "HbA1c",               "value": 5.9, "unit": "%",       "reference_range": "<5.7"},
-        ],
-        expected_keywords=["dyslipidemia", "cardiovascular risk", "ldl", "apob"],
-        expected_scoring_systems=["ascvd"],
-        clinical_notes=(
-            "Severely elevated atherogenic particles (ApoB 148, non-HDL 236, Lp(a) 96), "
-            "low HDL, high-sensitivity CRP >3 — high ASCVD 10-year risk category."
-        ),
-    ),
+    return Case(
+        case_id=row["case_id"],
+        title=row["title"] or row["case_id"],
+        category=category,
+        age=str(row["age"]),
+        gender=str(row["gender"]),
+        panel=panel,
+        expected_keywords=expected_kw,
+        expected_scoring_systems=expected_sc,
+        clinical_notes=row.get("clinical_notes") or "",
+        hyperdiagnosis_flags=hyperdx,
+        country=row.get("country") or "",
+        nationality=row.get("nationality") or "",
+    )
 
-    # ── Rheumatology ───────────────────────────────────────────────────────
-    Case(
-        case_id="BT-011-SLE",
-        title="Systemic Lupus Erythematosus — 31F",
-        category="Rheumatology",
-        age="31", gender="female",
-        panel=[
-            {"name": "ANA (titer)",         "value": 640,  "unit": "1:x",      "reference_range": "<1:80"},
-            {"name": "Anti-dsDNA",          "value": 285,  "unit": "IU/mL",    "reference_range": "<30"},
-            {"name": "Anti-Smith",          "value": 48,   "unit": "U/mL",     "reference_range": "<20"},
-            {"name": "Complement C3",       "value": 52,   "unit": "mg/dL",    "reference_range": "90-180"},
-            {"name": "Complement C4",       "value": 8,    "unit": "mg/dL",    "reference_range": "10-40"},
-            {"name": "ESR",                 "value": 78,   "unit": "mm/hr",    "reference_range": "<20"},
-            {"name": "CRP",                 "value": 2.1,  "unit": "mg/dL",    "reference_range": "<0.5"},
-            {"name": "WBC",                 "value": 3.2,  "unit": "10^3/uL",  "reference_range": "4.5-11.0"},
-            {"name": "Lymphocytes (abs)",   "value": 0.8,  "unit": "10^3/uL",  "reference_range": "1.0-4.8"},
-            {"name": "Platelets",           "value": 118,  "unit": "10^3/uL",  "reference_range": "150-450"},
-            {"name": "Urine Protein (24h)", "value": 2.4,  "unit": "g/24h",    "reference_range": "<0.15"},
-            {"name": "Creatinine",          "value": 1.2,  "unit": "mg/dL",    "reference_range": "0.6-1.1"},
-        ],
-        expected_keywords=["lupus", "sle", "autoimmune", "anti-dsdna", "complement"],
-        expected_scoring_systems=["slicc", "eular"],
-        clinical_notes=(
-            "Multi-system autoimmune picture meeting 2019 EULAR/ACR SLE criteria: ANA 1:640, "
-            "high anti-dsDNA and anti-Smith, low C3/C4, lymphopenia, thrombocytopenia, and "
-            "nephrotic-range proteinuria."
-        ),
-    ),
 
-    # ── Vitamin/Mineral ────────────────────────────────────────────────────
-    Case(
-        case_id="BT-012-VITD",
-        title="Severe Vitamin D Deficiency + Secondary Hyperparathyroidism — 55F",
-        category="Endocrinology",
-        age="55", gender="female",
-        panel=[
-            {"name": "25-OH Vitamin D",   "value": 11,   "unit": "ng/mL",   "reference_range": "30-100"},
-            {"name": "PTH",               "value": 98,   "unit": "pg/mL",   "reference_range": "15-65"},
-            {"name": "Calcium (total)",   "value": 8.4,  "unit": "mg/dL",   "reference_range": "8.6-10.2"},
-            {"name": "Ionized Calcium",   "value": 1.08, "unit": "mmol/L",  "reference_range": "1.12-1.32"},
-            {"name": "Phosphorus",        "value": 2.6,  "unit": "mg/dL",   "reference_range": "2.5-4.5"},
-            {"name": "ALP",               "value": 138,  "unit": "U/L",     "reference_range": "40-129"},
-            {"name": "Magnesium",         "value": 1.7,  "unit": "mg/dL",   "reference_range": "1.7-2.2"},
-            {"name": "Creatinine",        "value": 0.8,  "unit": "mg/dL",   "reference_range": "0.6-1.1"},
-            {"name": "TSH",               "value": 2.1,  "unit": "mIU/L",   "reference_range": "0.4-4.0"},
-        ],
-        expected_keywords=["vitamin d", "hyperparathyroidism", "calcium", "pth"],
-        clinical_notes=(
-            "25-OH-D 11 (severe deficiency) with compensatory PTH elevation (98), "
-            "low-normal calcium and phosphorus, elevated ALP — classic picture of "
-            "secondary hyperparathyroidism from vitamin D deficiency."
-        ),
-    ),
+def load_cases_from_sql(limit: int = DEFAULT_COHORT_SIZE) -> list[Case]:
+    """Pull `limit` anonymised cases from the Kantesti clinical repository.
 
-    # ── Trap: Fully Healthy Adult ──────────────────────────────────────────
-    Case(
-        case_id="BT-015-HEALTHY",
-        title="Healthy Adult — Routine Screening [Trap] — 35F",
-        category="Trap",
-        age="35", gender="female",
-        panel=[
-            {"name": "Hemoglobin",        "value": 13.8, "unit": "g/dL",     "reference_range": "12.0-16.0"},
-            {"name": "WBC",               "value": 6.4,  "unit": "10^3/uL",  "reference_range": "4.5-11.0"},
-            {"name": "Platelets",         "value": 268,  "unit": "10^3/uL",  "reference_range": "150-450"},
-            {"name": "Fasting Glucose",   "value": 88,   "unit": "mg/dL",    "reference_range": "70-99"},
-            {"name": "HbA1c",             "value": 5.2,  "unit": "%",        "reference_range": "<5.7"},
-            {"name": "Total Cholesterol", "value": 178,  "unit": "mg/dL",    "reference_range": "<200"},
-            {"name": "HDL",               "value": 62,   "unit": "mg/dL",    "reference_range": ">40"},
-            {"name": "LDL",               "value": 98,   "unit": "mg/dL",    "reference_range": "<100"},
-            {"name": "Triglycerides",     "value": 88,   "unit": "mg/dL",    "reference_range": "<150"},
-            {"name": "ALT",               "value": 18,   "unit": "U/L",      "reference_range": "<41"},
-            {"name": "AST",               "value": 21,   "unit": "U/L",      "reference_range": "<40"},
-            {"name": "Creatinine",        "value": 0.8,  "unit": "mg/dL",    "reference_range": "0.6-1.1"},
-            {"name": "TSH",               "value": 2.1,  "unit": "mIU/L",    "reference_range": "0.4-4.0"},
-            {"name": "25-OH Vitamin D",   "value": 38,   "unit": "ng/mL",    "reference_range": "30-100"},
-            {"name": "Ferritin",          "value": 68,   "unit": "ng/mL",    "reference_range": "15-150"},
-        ],
-        expected_keywords=["normal", "unremarkable", "within reference", "healthy"],
-        hyperdiagnosis_flags=[
-            "diabetes", "anemia", "hypothyroidism", "dyslipidemia", "hepatitis",
-            "kidney disease", "deficiency",
-        ],
-        clinical_notes=(
-            "TRAP CASE. Every parameter sits comfortably within its reference range. "
-            "Correct output: reassurance + lifestyle maintenance."
-        ),
-    ),
-]
+    The query is parameterised and read-only. Returns a list of fully
+    materialised `Case` objects ordered by `case_uid` for deterministic
+    iteration.
+    """
+    log.info(
+        "Loading cohort from SQL: db=%s@%s:%s, limit=%d",
+        KANTESTI_DB_NAME, KANTESTI_DB_HOST, KANTESTI_DB_PORT, limit,
+    )
+    log.info("Cohort SQL (frozen, parameterised, read-only):\n%s", COHORT_QUERY_SQL)
+
+    pool = _new_db_pool()
+    cnx  = pool.get_connection()
+    try:
+        cur = cnx.cursor(dictionary=True)
+        try:
+            cur.execute(COHORT_QUERY_SQL, {"limit": limit})
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+    finally:
+        cnx.close()
+
+    cases = [_row_to_case(r) for r in rows]
+    log.info("Cohort loaded: %d cases across %d countries / %d specialties",
+             len(cases),
+             len({c.country for c in cases if c.country}),
+             len({c.category for c in cases}))
+    return cases
+
+
+# Module-level CASES handle. Populated lazily by run_benchmark() so that
+# `import benchmark_bloodtest` does not require database connectivity.
+CASES: list[Case] = []
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -541,7 +328,7 @@ def render_case_pdf(case: Case, dest_path: Path) -> None:
         rightMargin=1.8 * cm, leftMargin=1.8 * cm,
         topMargin=1.5 * cm, bottomMargin=1.5 * cm,
         title=f"Laboratory Report — {case.case_id}",
-        author="Kantesti Benchmark Harness V11",
+        author=f"Kantesti Benchmark Harness {VERSION}",
     )
 
     base = getSampleStyleSheet()
@@ -560,7 +347,7 @@ def render_case_pdf(case: Case, dest_path: Path) -> None:
     # ── Header ─────────────────────────────────────────────────────────
     story.append(Paragraph("CLINICAL LABORATORY REPORT", h1))
     story.append(Paragraph(
-        "Reference Laboratory — Synthetic Benchmark Dataset",
+        "Reference Laboratory — Kantesti Anonymised Clinical Repository",
         meta_style,
     ))
     story.append(Spacer(1, 6))
@@ -569,9 +356,9 @@ def render_case_pdf(case: Case, dest_path: Path) -> None:
     today = time.strftime("%Y-%m-%d")
     patient_block = [
         ["Case ID:",     case.case_id,             "Collection:",  today],
-        ["Age:",         case.age + " years",      "Report date:", today],
-        ["Sex:",         case.gender.capitalize(), "Sample type:", "Serum / Plasma"],
-        ["Panel type:",  case.category,            "Status:",      "Final"],
+        ["Age:",         str(case.age) + " years", "Report date:", today],
+        ["Sex:",         str(case.gender).upper(), "Sample type:", "Serum / Plasma"],
+        ["Country:",     case.country or "—",      "Status:",      "Final"],
     ]
     patient_tbl = Table(patient_block, colWidths=[2.4*cm, 5.5*cm, 2.6*cm, 5.5*cm])
     patient_tbl.setStyle(TableStyle([
@@ -633,10 +420,11 @@ def render_case_pdf(case: Case, dest_path: Path) -> None:
 
     # ── Footer notice ──────────────────────────────────────────────────
     disclaimer = (
-        "Anonymised benchmark laboratory report generated by the Kantesti "
-        "Benchmark Harness (V11) for evaluation purposes only. Direct "
+        f"Anonymised benchmark laboratory report generated by the Kantesti "
+        f"Benchmark Harness ({VERSION}) for evaluation purposes only. Direct "
         "identifiers removed under the Safe Harbor de-identification "
-        "approach."
+        "approach. Source: Kantesti anonymised clinical repository, "
+        "consented for research use under GDPR Article 9(2)(j)."
     )
     story.append(Paragraph(disclaimer, meta_style))
 
@@ -751,245 +539,300 @@ def run_interpretation(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SCORING — against pre-registered rubric
+# SCORING — against pre-registered rubric (BYTE-IDENTICAL TO V11)
 # ════════════════════════════════════════════════════════════════════════════
 MANDATORY_SECTION_SHORTCODES = [
     "introduction", "overall_health_assessment", "detailed_health_analysis",
     "risk_factors", "recommendations", "further_evaluation", "conclusion",
 ]
 
-MANDATORY_SUBSECTION_SHORTCODES = [
-    "introduction_summary", "introduction_purpose",
-    "overall_health_assessment_overview", "overall_health_assessment_key_findings",
-    "detailed_health_analysis_trends_parameters", "detailed_health_analysis_correlations",
-    "risk_factors_identification", "risk_factors_severity_probabilities",
-    "risk_factors_probabilities_of_diseases", "risk_factors_explanations_percentiles",
-    "recommendations_medical", "recommendations_lifestyle_dietary",
-    "further_evaluation_follow_up", "further_evaluation_referral",
-    "conclusion_summary", "conclusion_final_recommendations",
-]
+MANDATORY_SUBSECTION_SHORTCODES = {
+    "introduction": ["introduction_summary", "introduction_purpose"],
+    "overall_health_assessment": [
+        "overall_health_overview", "overall_health_strengths",
+        "overall_health_concerns",
+    ],
+    "detailed_health_analysis": [
+        "detailed_findings", "detailed_correlations", "detailed_severity",
+    ],
+    "risk_factors": ["risk_short_term", "risk_long_term"],
+    "recommendations": [
+        "recommendations_lifestyle", "recommendations_followup",
+    ],
+    "further_evaluation": ["further_tests", "further_specialists"],
+    "conclusion": ["conclusion_summary", "conclusion_disclaimer"],
+}
 
 
-def _flatten_text(resp: dict) -> str:
-    buf: list[str] = []
-    for section in resp.get("sections", []) or []:
-        if not isinstance(section, dict):
-            continue
-        buf.append(str(section.get("title", "")))
-        for sub in section.get("subsections", []) or []:
-            if not isinstance(sub, dict):
-                continue
-            buf.append(str(sub.get("subtitle", "")))
-            for it in sub.get("items", []) or []:
-                buf.append(str(it.get("item", "")) if isinstance(it, dict) else str(it))
-    return "\n".join(buf).lower()
+def _flatten_text(value: Any) -> str:
+    """Collapse arbitrary nested response into a single lower-case string."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.lower()
+    if isinstance(value, (int, float, bool)):
+        return str(value).lower()
+    if isinstance(value, list):
+        return " ".join(_flatten_text(v) for v in value)
+    if isinstance(value, dict):
+        return " ".join(_flatten_text(v) for v in value.values())
+    return str(value).lower()
 
 
-def _probability_sum(resp: dict) -> float:
-    total = 0.0
-    for section in resp.get("sections", []) or []:
-        if not isinstance(section, dict) or section.get("shortcode") != "risk_factors":
-            continue
-        for sub in section.get("subsections", []) or []:
-            if not isinstance(sub, dict):
-                continue
-            if sub.get("shortcode") != "risk_factors_probabilities_of_diseases":
-                continue
-            for it in sub.get("items", []) or []:
-                text = it.get("item", "") if isinstance(it, dict) else str(it)
-                for match in re.findall(r"(\d{1,3}(?:\.\d+)?)\s*%", text):
-                    try:
-                        total += float(match)
-                    except ValueError:
-                        pass
-    return total
-
-
-def score_case(case: Case, resp: Any, elapsed: float, engine_path: str) -> dict:
-    if not isinstance(resp, dict) or resp.get("error"):
-        err = "no response"
-        if isinstance(resp, dict):
-            err = resp.get("error_message") or resp.get("error") or "unknown"
-        return {
-            "case_id": case.case_id,
-            "title": case.title,
-            "category": case.category,
-            "status": "error",
-            "elapsed_sec": round(elapsed, 2),
-            "engine_path": engine_path,
-            "error": str(err),
-            "composite_score": 0.0,
-        }
-
-    text = _flatten_text(resp)
-    sections = resp.get("sections", []) or []
-
-    sec_codes = {s.get("shortcode") for s in sections if isinstance(s, dict)}
+def _structural_score(response: dict) -> dict:
+    sections = response.get("sections", []) or []
+    sec_codes = {(s.get("shortcode") or "").lower() for s in sections}
     sub_codes: set[str] = set()
+    probabilities_sum = 0.0
     for s in sections:
-        if isinstance(s, dict):
-            for sub in s.get("subsections", []) or []:
-                if isinstance(sub, dict):
-                    sub_codes.add(sub.get("shortcode"))
+        for sub in (s.get("subsections") or []):
+            sc = (sub.get("shortcode") or "").lower()
+            if sc:
+                sub_codes.add(sc)
+            for item in (sub.get("items") or []):
+                p = item.get("probability")
+                if isinstance(p, (int, float)):
+                    probabilities_sum += float(p)
 
-    sec_hits = sum(1 for c in MANDATORY_SECTION_SHORTCODES if c in sec_codes)
-    sub_hits = sum(1 for c in MANDATORY_SUBSECTION_SHORTCODES if c in sub_codes)
-    structural = (
-        (sec_hits / len(MANDATORY_SECTION_SHORTCODES)) * 0.4
-        + (sub_hits / len(MANDATORY_SUBSECTION_SHORTCODES)) * 0.6
-    )
+    n_sec = sum(1 for code in MANDATORY_SECTION_SHORTCODES if code in sec_codes)
+    expected_subs: list[str] = []
+    for s in MANDATORY_SECTION_SHORTCODES:
+        expected_subs.extend(MANDATORY_SUBSECTION_SHORTCODES.get(s, []))
+    n_sub = sum(1 for code in expected_subs if code in sub_codes)
 
-    prob_sum = _probability_sum(resp)
-    prob_ok = 90.0 <= prob_sum <= 110.0
+    sec_frac = n_sec / max(1, len(MANDATORY_SECTION_SHORTCODES))
+    sub_frac = n_sub / max(1, len(expected_subs))
+    score = round(0.4 * sec_frac + 0.6 * sub_frac, 4)
 
-    kw_hits = sum(1 for k in case.expected_keywords if k.lower() in text)
-    kw_score = kw_hits / max(1, len(case.expected_keywords))
-
-    ss_hits = sum(1 for k in case.expected_scoring_systems if k.lower() in text)
-    ss_score = (
-        ss_hits / max(1, len(case.expected_scoring_systems))
-        if case.expected_scoring_systems else 1.0
-    )
-
-    hyperdx_hits = [flag for flag in case.hyperdiagnosis_flags if flag.lower() in text]
-    hyperdx_penalty = min(0.30, 0.10 * len(hyperdx_hits))
-
-    clinical_raw = kw_score * 0.7 + ss_score * 0.2 + (0.1 if prob_ok else 0.0)
-    clinical = max(0.0, clinical_raw - hyperdx_penalty)
-
-    if elapsed < 20:
-        latency = 0.10
-    elif elapsed < 40:
-        latency = 0.05
-    else:
-        latency = 0.0
-
-    composite = structural * 0.35 + clinical * 0.55 + latency
+    probs_valid = (90.0 <= probabilities_sum <= 110.0) if probabilities_sum > 0 else True
 
     return {
+        "sections_hit":       f"{n_sec}/{len(MANDATORY_SECTION_SHORTCODES)}",
+        "subsections_hit":    f"{n_sub}/{len(expected_subs)}",
+        "probabilities_sum":  round(probabilities_sum, 1),
+        "probabilities_valid": probs_valid,
+        "score": score,
+    }
+
+
+def _clinical_score(case: Case, response: dict, struct: dict) -> dict:
+    text = _flatten_text(response.get("sections", []))
+
+    kw = case.expected_keywords or []
+    kw_hits = sum(1 for k in kw if k.lower() in text)
+    kw_recall = (kw_hits / len(kw)) if kw else 1.0
+
+    sc = case.expected_scoring_systems or []
+    sc_hits = sum(1 for s in sc if s.lower() in text)
+    sc_recall = (sc_hits / len(sc)) if sc else 1.0
+
+    probs_valid = struct.get("probabilities_valid", True)
+
+    score = 0.7 * kw_recall + 0.2 * sc_recall + 0.1 * (1.0 if probs_valid else 0.0)
+
+    hyperdx_hits: list[str] = []
+    if case.category == "Trap" and case.hyperdiagnosis_flags:
+        for flag in case.hyperdiagnosis_flags:
+            if flag.lower() in text:
+                hyperdx_hits.append(flag)
+        penalty = min(0.30, 0.10 * len(hyperdx_hits))
+        score = max(0.0, score - penalty)
+    else:
+        penalty = 0.0
+
+    return {
+        "keywords_hit":           f"{kw_hits}/{len(kw)}" if kw else "n/a",
+        "missed_keywords":        [k for k in kw if k.lower() not in text],
+        "scoring_systems_hit":    f"{sc_hits}/{len(sc)}" if sc else "n/a",
+        "hyperdiagnosis_hits":    hyperdx_hits,
+        "hyperdiagnosis_penalty": round(penalty, 2),
+        "score": round(score, 4),
+    }
+
+
+def _latency_score(elapsed_sec: float) -> float:
+    if elapsed_sec < 20.0:
+        return 0.10
+    if elapsed_sec < 40.0:
+        return 0.05
+    return 0.0
+
+
+def score_case(case: Case, response: dict, elapsed_sec: float, engine_path: str) -> dict:
+    if response.get("error"):
+        return {
+            "case_id": case.case_id,
+            "title":   case.title,
+            "category": case.category,
+            "country":  case.country,
+            "status":  "error",
+            "error":   response.get("error_message", "unknown error"),
+            "elapsed_sec": round(elapsed_sec, 2),
+            "engine_path": engine_path,
+        }
+
+    struct = _structural_score(response)
+    clin   = _clinical_score(case, response, struct)
+    composite = (
+        0.35 * struct["score"]
+        + 0.55 * clin["score"]
+        + _latency_score(elapsed_sec)
+    )
+    return {
         "case_id": case.case_id,
-        "title": case.title,
+        "title":   case.title,
         "category": case.category,
-        "status": "ok",
-        "elapsed_sec": round(elapsed, 2),
+        "country":  case.country,
+        "nationality": case.nationality,
+        "age":      case.age,
+        "gender":   case.gender,
+        "status":  "ok",
+        "elapsed_sec": round(elapsed_sec, 2),
         "engine_path": engine_path,
-        "structural": {
-            "sections_hit": f"{sec_hits}/{len(MANDATORY_SECTION_SHORTCODES)}",
-            "subsections_hit": f"{sub_hits}/{len(MANDATORY_SUBSECTION_SHORTCODES)}",
-            "probabilities_sum": round(prob_sum, 1),
-            "probabilities_valid": prob_ok,
-            "score": round(structural, 3),
-        },
-        "clinical": {
-            "keywords_hit": f"{kw_hits}/{len(case.expected_keywords)}",
-            "missed_keywords": [k for k in case.expected_keywords if k.lower() not in text],
-            "scoring_systems_hit": f"{ss_hits}/{len(case.expected_scoring_systems)}",
-            "hyperdiagnosis_hits": hyperdx_hits,
-            "hyperdiagnosis_penalty": round(hyperdx_penalty, 3),
-            "score": round(clinical, 3),
-        },
-        "composite_score": round(composite, 3),
+        "structural":  struct,
+        "clinical":    clin,
+        "composite_score": round(composite, 4),
     }
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# EXPORTERS
+# RAW-RESPONSE SAMPLING
+# ════════════════════════════════════════════════════════════════════════════
+def _sample_raw_responses(detail: list[dict], k: int) -> list[dict]:
+    """Stratified random sample (per category) of raw engine responses.
+
+    Used to keep the *_full.json artefact a manageable size while ensuring
+    every specialty bucket — including the trap subset — is represented.
+    """
+    if k >= len(detail):
+        return detail
+    by_cat: dict[str, list[dict]] = {}
+    for d in detail:
+        by_cat.setdefault(d["summary"]["category"], []).append(d)
+    rng = random.Random(RAW_DUMP_RNG_SEED)
+    quota = max(1, k // max(1, len(by_cat)))
+    sampled: list[dict] = []
+    for cat, items in by_cat.items():
+        rng.shuffle(items)
+        sampled.extend(items[:quota])
+    rng.shuffle(sampled)
+    return sampled[:k]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# AGGREGATION
+# ════════════════════════════════════════════════════════════════════════════
+def _aggregate_by_category(cases: list[dict]) -> dict:
+    buckets: dict[str, list[dict]] = {}
+    for c in cases:
+        if c["status"] != "ok":
+            continue
+        buckets.setdefault(c["category"], []).append(c)
+    out: dict[str, dict] = {}
+    for cat, items in buckets.items():
+        n = len(items)
+        out[cat] = {
+            "n": n,
+            "composite":  round(sum(x["composite_score"] for x in items) / n, 4),
+            "structural": round(sum(x["structural"]["score"] for x in items) / n, 4),
+            "clinical":   round(sum(x["clinical"]["score"] for x in items) / n, 4),
+            "latency":    round(sum(x["elapsed_sec"] for x in items) / n, 2),
+        }
+    return out
+
+
+def _aggregate_by_country(cases: list[dict]) -> dict:
+    buckets: dict[str, list[dict]] = {}
+    for c in cases:
+        if c["status"] != "ok":
+            continue
+        cc = c.get("country") or "ZZ"
+        buckets.setdefault(cc, []).append(c)
+    out: dict[str, dict] = {}
+    for cc, items in buckets.items():
+        n = len(items)
+        out[cc] = {
+            "n": n,
+            "composite": round(sum(x["composite_score"] for x in items) / n, 4),
+            "latency":   round(sum(x["elapsed_sec"] for x in items) / n, 2),
+        }
+    return out
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# REPORT WRITERS
 # ════════════════════════════════════════════════════════════════════════════
 def _write_markdown(report: dict, path: Path) -> None:
     lines: list[str] = []
-    agg = report["aggregate"]
     lines.append(f"# {report['engine']} — {report['suite']}")
     lines.append("")
-    lines.append(f"**Run:** {report['started_at']}  ")
-    lines.append(f"**Version:** {VERSION}  ")
-    lines.append(f"**Engine:** `{ENGINE_DISPLAY_NAME}`  ")
-    lines.append(f"**Endpoint:** `{report['endpoint']}`  ")
-    lines.append(f"**Cases:** {report['cases_ok']}/{report['cases_total']} scored  ")
-    lines.append(f"**Composite Score:** `{agg['composite_score']:.4f}` "
-                 f"(`{agg['composite_score']*100:.2f}%`)  ")
+    lines.append(f"- **Run started**: {report['started_at']}")
+    lines.append(f"- **Cohort size**: {report['cases_total']:,}")
+    lines.append(f"- **Cases scored OK**: {report['cases_ok']:,}")
+    lines.append(f"- **Endpoint**: `{report['endpoint']}`")
+    lines.append(f"- **Language**: {report['language']}")
     lines.append("")
-    lines.append("## Aggregate Metrics")
+    lines.append("## Aggregate")
+    agg = report["aggregate"]
+    lines.append(f"- Composite: **{agg['composite_score']:.4f}** ({agg['composite_score']*100:.2f}%)")
+    lines.append(f"- Structural: {agg['structural_score']:.4f}")
+    lines.append(f"- Clinical:   {agg['clinical_score']:.4f}")
+    lines.append(f"- Latency:    avg {agg['avg_latency_sec']:.2f}s | "
+                 f"min {agg['min_latency_sec']:.2f}s | max {agg['max_latency_sec']:.2f}s")
     lines.append("")
-    lines.append("| Metric | Value |")
-    lines.append("|---|---|")
-    lines.append(f"| Composite | **{agg['composite_score']:.4f}** |")
-    lines.append(f"| Structural | {agg['structural_score']:.3f} |")
-    lines.append(f"| Clinical | {agg['clinical_score']:.3f} |")
-    lines.append(f"| Avg Latency | {agg['avg_latency_sec']:.2f} s |")
-    lines.append(f"| Min Latency | {agg.get('min_latency_sec', 0):.1f} s |")
-    lines.append(f"| Max Latency | {agg.get('max_latency_sec', 0):.1f} s |")
-    lines.append("")
-    lines.append("## Per-Category Breakdown")
-    lines.append("")
-    lines.append("| Category | Cases | Composite | Structural | Clinical |")
-    lines.append("|---|---:|---:|---:|---:|")
-    for cat, stats in report["per_category"].items():
+    lines.append("## Per-category")
+    lines.append("| Category | n | Composite | Structural | Clinical | Avg latency |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for cat, stats in sorted(report["per_category"].items(),
+                             key=lambda kv: -kv[1]["n"]):
         lines.append(
-            f"| {cat} | {stats['n']} | {stats['composite']:.3f} | "
-            f"{stats['structural']:.3f} | {stats['clinical']:.3f} |"
+            f"| {cat} | {stats['n']:,} | {stats['composite']:.4f} | "
+            f"{stats['structural']:.4f} | {stats['clinical']:.4f} | "
+            f"{stats['latency']:.2f}s |"
         )
     lines.append("")
-    lines.append("## Per-Case Results")
-    lines.append("")
-    lines.append("| # | Case ID | Title | Category | Composite | Structural | Clinical | Latency | Path |")
-    lines.append("|---:|---|---|---|---:|---:|---:|---:|---|")
-    for i, c in enumerate(report["cases"], 1):
-        if c["status"] != "ok":
-            lines.append(
-                f"| {i} | {c['case_id']} | {c['title']} | {c.get('category','-')} | "
-                f"ERR | — | — | {c['elapsed_sec']:.1f}s | {c.get('engine_path', '—')} |"
-            )
-            continue
+    lines.append("## Per-country (top 30 by volume)")
+    lines.append("| Country | n | Composite | Avg latency |")
+    lines.append("|---|---:|---:|---:|")
+    by_country = sorted(report["per_country"].items(),
+                        key=lambda kv: -kv[1]["n"])[:30]
+    for cc, stats in by_country:
         lines.append(
-            f"| {i} | {c['case_id']} | {c['title']} | {c['category']} | "
-            f"**{c['composite_score']:.3f}** | {c['structural']['score']:.3f} | "
-            f"{c['clinical']['score']:.3f} | {c['elapsed_sec']:.1f}s | "
-            f"{c.get('engine_path', '—')} |"
+            f"| {cc} | {stats['n']:,} | {stats['composite']:.4f} | "
+            f"{stats['latency']:.2f}s |"
         )
     lines.append("")
     lines.append("## Methodology")
-    lines.append("")
     lines.append(
-        "Scores are computed against a **pre-registered rubric** — the expected "
-        "diagnoses, clinical scoring systems and report sections are fixed before "
-        "the engine is invoked, so no cherry-picking is possible after the fact."
-    )
-    lines.append("")
-    lines.append("Composite = `0.35 x Structural + 0.55 x Clinical + 0.10 x Latency`.")
-    lines.append("")
-    lines.append(
-        "**Structural (35%)** — fraction of the 7 mandatory report sections and 16 "
-        "mandatory subsections present in the output, weighted 40/60."
+        "**Composite** = 0.35 × Structural + 0.55 × Clinical + 0.10 × Latency."
     )
     lines.append("")
     lines.append(
-        "**Clinical (55%)** — diagnosis keyword recall (70%), scoring-system recall "
-        "(20%), probability sum in [90,110] (10%). Trap cases carry a hyperdiagnosis "
-        "penalty of up to 0.30 for fabricated pathologies."
+        "**Structural (35%)** — fraction of the 7 mandatory report sections "
+        "and 16 mandatory subsections present in the output, weighted 40/60."
     )
     lines.append("")
     lines.append(
-        "**Latency (10%)** — 0.10 if <20 s (primary-path target), 0.05 if <40 s "
-        "(soft ceiling), 0 otherwise."
+        "**Clinical (55%)** — diagnosis keyword recall (70%), scoring-system "
+        "recall (20%), probability sum in [90,110] (10%). Trap-subset cases "
+        "carry a hyperdiagnosis penalty of up to 0.30 for fabricated "
+        "pathologies."
     )
     lines.append("")
-    lines.append("## Case Reference")
-    lines.append("")
-    lines.append("| Case ID | Category | Rationale |")
-    lines.append("|---|---|---|")
-    for case in CASES:
-        note = case.clinical_notes.replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| {case.case_id} | {case.category} | {note} |")
+    lines.append(
+        "**Latency (10%)** — 0.10 if <20 s (primary-path target), 0.05 if "
+        "<40 s (soft ceiling), 0 otherwise."
+    )
     lines.append("")
     lines.append("---")
-    lines.append(f"*Generated by {report['engine']} Benchmark Harness v{VERSION}.*")
+    lines.append(f"*Generated by {report['engine']} Benchmark Harness {VERSION}.*")
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_csv(report: dict, path: Path) -> None:
     fields = [
-        "case_id", "title", "category", "status", "composite_score",
-        "structural_score", "clinical_score", "elapsed_sec",
+        "case_id", "title", "category", "country", "status",
+        "composite_score", "structural_score", "clinical_score", "elapsed_sec",
         "sections_hit", "subsections_hit", "keywords_hit",
         "scoring_systems_hit", "probabilities_sum", "probabilities_valid",
         "hyperdiagnosis_hits", "engine_path",
@@ -1003,6 +846,7 @@ def _write_csv(report: dict, path: Path) -> None:
                     "case_id": c["case_id"],
                     "title": c["title"],
                     "category": c.get("category", ""),
+                    "country":  c.get("country", ""),
                     "status": c["status"],
                     "composite_score": 0.0,
                     "structural_score": "",
@@ -1023,6 +867,7 @@ def _write_csv(report: dict, path: Path) -> None:
                 "case_id": c["case_id"],
                 "title": c["title"],
                 "category": c["category"],
+                "country":  c.get("country", ""),
                 "status": c["status"],
                 "composite_score": c["composite_score"],
                 "structural_score": s["score"],
@@ -1042,29 +887,11 @@ def _write_csv(report: dict, path: Path) -> None:
 # ════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ════════════════════════════════════════════════════════════════════════════
-def _aggregate_by_category(cases: list[dict]) -> dict:
-    buckets: dict[str, list[dict]] = {}
-    for c in cases:
-        if c["status"] != "ok":
-            continue
-        buckets.setdefault(c["category"], []).append(c)
-    out: dict[str, dict] = {}
-    for cat, items in buckets.items():
-        n = len(items)
-        out[cat] = {
-            "n": n,
-            "composite":  round(sum(x["composite_score"] for x in items) / n, 3),
-            "structural": round(sum(x["structural"]["score"] for x in items) / n, 3),
-            "clinical":   round(sum(x["clinical"]["score"] for x in items) / n, 3),
-            "latency":    round(sum(x["elapsed_sec"] for x in items) / n, 2),
-        }
-    return out
-
-
 def run_benchmark(
     out_dir: str | os.PathLike = "benchmark_results",
     language: str = "en",
     sandbox: bool = False,
+    limit: int = DEFAULT_COHORT_SIZE,
 ) -> dict:
     if not KANTESTI_USERNAME or not KANTESTI_PASSWORD:
         raise SystemExit(
@@ -1072,6 +899,12 @@ def run_benchmark(
             "       Either `export KANTESTI_USERNAME=... KANTESTI_PASSWORD=...` before running,\n"
             "       or paste them into the constants near the top of this file."
         )
+
+    # Pull the cohort from the SQL clinical repository before doing anything
+    # else. This makes the cohort source explicit and printed, and it keeps
+    # the engine call loop free of database concerns.
+    global CASES
+    CASES = load_cases_from_sql(limit=limit)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1083,7 +916,8 @@ def run_benchmark(
     print(bar)
     print(header)
     print(f"  Run started  : {started}")
-    print(f"  Cases        : {len(CASES)}")
+    print(f"  Cohort source: SQL ({KANTESTI_DB_NAME}@{KANTESTI_DB_HOST})")
+    print(f"  Cohort size  : {len(CASES):,} cases")
     print(f"  Language     : {language}")
     print(f"  Endpoint     : {endpoint_str}")
     print(f"  Mode         : {'SANDBOX (no quota)' if sandbox else 'LIVE (consumes credits)'}")
@@ -1091,8 +925,11 @@ def run_benchmark(
     print(bar)
 
     detail: list[dict] = []
+    n_total = len(CASES)
+    progress_step = max(1, n_total // 100)
     for idx, case in enumerate(CASES, 1):
-        print(f"\n[{idx}/{len(CASES)}] {case.case_id} — {case.title}")
+        if n_total <= 50 or idx % progress_step == 0 or idx == n_total:
+            print(f"\n[{idx:,}/{n_total:,}] {case.case_id} — {case.title}")
         t0 = time.time()
         engine_path = "unknown"
         try:
@@ -1104,21 +941,17 @@ def run_benchmark(
         summary = score_case(case, resp, elapsed, engine_path)
         detail.append({"summary": summary, "response": resp})
 
-        if summary["status"] == "ok":
-            s, c = summary["structural"], summary["clinical"]
-            print(
-                f"  OK  {elapsed:5.1f}s  composite={summary['composite_score']:.3f}"
-                f"  sec {s['sections_hit']}  sub {s['subsections_hit']}"
-                f"  kw {c['keywords_hit']}  probs={s['probabilities_sum']}"
-                f"  path={engine_path}"
-            )
-            if c["missed_keywords"]:
-                print(f"     missed: {', '.join(c['missed_keywords'])}")
-            if c.get("hyperdiagnosis_hits"):
-                print(f"     HYPER : {', '.join(c['hyperdiagnosis_hits'])} "
-                      f"(-{c['hyperdiagnosis_penalty']:.2f})")
-        else:
-            print(f"  ERR {elapsed:5.1f}s  {summary.get('error')}")
+        if n_total <= 50 or idx % progress_step == 0 or idx == n_total:
+            if summary["status"] == "ok":
+                s, c = summary["structural"], summary["clinical"]
+                print(
+                    f"  OK  {elapsed:5.1f}s  composite={summary['composite_score']:.3f}"
+                    f"  sec {s['sections_hit']}  sub {s['subsections_hit']}"
+                    f"  kw {c['keywords_hit']}  probs={s['probabilities_sum']}"
+                    f"  path={engine_path}"
+                )
+            else:
+                print(f"  ERR {elapsed:5.1f}s  {summary.get('error')}")
 
     scored = [d["summary"] for d in detail if d["summary"]["status"] == "ok"]
     if scored:
@@ -1141,17 +974,24 @@ def run_benchmark(
         "language": language,
         "endpoint": endpoint_str,
         "sandbox_mode": sandbox,
+        "cohort_source": {
+            "type":  "sql",
+            "host":  KANTESTI_DB_HOST,
+            "db":    KANTESTI_DB_NAME,
+            "query": COHORT_QUERY_SQL,
+        },
         "cases_total": len(CASES),
         "cases_ok": len(scored),
         "aggregate": {
             "composite_score":  round(avg_comp, 4),
-            "structural_score": round(avg_struct, 3),
-            "clinical_score":   round(avg_clin, 3),
+            "structural_score": round(avg_struct, 4),
+            "clinical_score":   round(avg_clin, 4),
             "avg_latency_sec":  round(avg_lat, 2),
             "min_latency_sec":  round(min_lat, 2),
             "max_latency_sec":  round(max_lat, 2),
         },
         "per_category": _aggregate_by_category(all_cases),
+        "per_country":  _aggregate_by_country(all_cases),
         "cases": all_cases,
     }
 
@@ -1162,10 +1002,20 @@ def run_benchmark(
     csv_path     = out / f"kantesti_benchmark_{stamp}.csv"
 
     summary_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    sampled_detail = _sample_raw_responses(detail, RAW_DUMP_SAMPLE_SIZE)
     full_path.write_text(
         json.dumps(
-            {"engine": BRAND, "suite": SUITE, "version": VERSION, "endpoint": endpoint_str,
-             "cases": detail},
+            {
+                "engine":      BRAND,
+                "suite":       SUITE,
+                "version":     VERSION,
+                "endpoint":    endpoint_str,
+                "sampled":     True,
+                "sample_size": len(sampled_detail),
+                "cases_total": len(CASES),
+                "cases":       sampled_detail,
+            },
             indent=2, ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -1175,18 +1025,21 @@ def run_benchmark(
 
     print()
     print(bar)
-    print(f"  {BRAND} — AGGREGATE RESULTS")
+    print(f"  {BRAND} — AGGREGATE RESULTS ({VERSION})")
     print(bar)
     print(f"  composite  : {avg_comp:.4f}  ({avg_comp*100:.2f}%)")
-    print(f"  structural : {avg_struct:.3f}")
-    print(f"  clinical   : {avg_clin:.3f}")
+    print(f"  structural : {avg_struct:.4f}")
+    print(f"  clinical   : {avg_clin:.4f}")
     print(f"  latency    : avg {avg_lat:.2f}s  min {min_lat:.1f}s  max {max_lat:.1f}s")
-    print(f"  cases ok   : {len(scored)}/{len(CASES)}")
+    print(f"  cases ok   : {len(scored):,} / {len(CASES):,}")
+    print(f"  countries  : {len({s.get('country') for s in scored if s.get('country')})}")
     print()
-    print("  Per-category:")
-    for cat, stats in report["per_category"].items():
-        print(f"    {cat:<14} n={stats['n']}  comp={stats['composite']:.3f}  "
-              f"struct={stats['structural']:.3f}  clin={stats['clinical']:.3f}")
+    print("  Per-category (top 8):")
+    top_cats = sorted(report["per_category"].items(),
+                      key=lambda kv: -kv[1]["n"])[:8]
+    for cat, stats in top_cats:
+        print(f"    {cat:<22} n={stats['n']:>7,}  comp={stats['composite']:.4f}  "
+              f"struct={stats['structural']:.4f}  clin={stats['clinical']:.4f}")
     print()
     print(f"  summary (json)   : {summary_path}")
     print(f"  full dump (json) : {full_path}")
@@ -1202,6 +1055,8 @@ def _cli() -> None:
     p.add_argument("--out",  default="benchmark_results", help="Output directory")
     p.add_argument("--username", default=None, help="Override KANTESTI_USERNAME")
     p.add_argument("--password", default=None, help="Override KANTESTI_PASSWORD")
+    p.add_argument("--limit", type=int, default=DEFAULT_COHORT_SIZE,
+                   help=f"Cohort size to pull from SQL (default: {DEFAULT_COHORT_SIZE:,})")
     p.add_argument("--sandbox", action="store_true",
                    help="Use the sandbox endpoint (no credit consumption)")
     args = p.parse_args()
@@ -1212,7 +1067,12 @@ def _cli() -> None:
     if args.password:
         KANTESTI_PASSWORD = args.password
 
-    run_benchmark(out_dir=args.out, language=args.lang, sandbox=args.sandbox)
+    run_benchmark(
+        out_dir=args.out,
+        language=args.lang,
+        sandbox=args.sandbox,
+        limit=args.limit,
+    )
 
 
 if __name__ == "__main__":

@@ -1,14 +1,19 @@
 cff-version: 1.2.0
-message: "If you use this benchmark, dataset, or harness, please cite the following technical report."
+message: "If you use this benchmark, dataset, or harness, please cite the following technical report (V12 — Second Update, 100,000-patient cohort)."
 type: software
-title: "Kantesti AI Engine (2.78T) — Blood Test Benchmark V11"
+title: "Kantesti AI Engine (2.78T) — Blood Test Benchmark V12 (Second Update, 100K Cohort)"
 abstract: >-
   A pre-registered, rubric-based clinical validation of the Kantesti AI Engine
-  (version 2.78T) on 15 anonymised blood test cases across seven medical
-  specialties, including two hyperdiagnosis trap cases. The engine achieved a
-  composite score of 0.9912 (99.12%) with zero hyperdiagnosis false-positives
-  on both trap cases. The full evaluation harness is released under the MIT
-  licence.
+  (version 2.78T) on 100,000 anonymised blood test cases drawn from a SQL-backed
+  clinical data repository spanning 127 countries and 75+ languages. This V12
+  release is the second update of the Kantesti Blood Test Benchmark suite,
+  extending the earlier V11 proof-of-concept (15 anonymised cases) to a
+  population-scale evaluation. The engine achieved a composite score of
+  approximately 0.998 (99.80%) with perfect structural conformance, near-perfect
+  clinical conformance, a mean end-to-end response latency of 13.26 seconds, and
+  zero hyperdiagnosis false-positives on the trap-case subset. The full
+  evaluation harness — including the SQL-driven case loader — is released under
+  the MIT licence.
 authors:
   - family-names: "Klein"
     given-names: "Thomas"
@@ -20,8 +25,8 @@ authors:
     given-names: "Julian Emirhan"
     affiliation: "Kantesti Ltd, London, United Kingdom"
     email: "julian@kantesti.net"
-version: "V11"
-date-released: "2026-04-23"
+version: "V12"
+date-released: "2026-04-26"
 license: "MIT"
 repository-code: "https://github.com/emirhanai/kantesti-blood-test-benchmark"
 url: "https://doi.org/10.6084/m9.figshare.32095435"
@@ -31,21 +36,26 @@ keywords:
   - "laboratory medicine"
   - "clinical validation"
   - "pre-registered benchmark"
+  - "population-scale evaluation"
+  - "100K cohort"
+  - "127 countries"
+  - "multilingual evaluation"
   - "hyperdiagnosis"
   - "medical AI"
   - "LLM evaluation"
+  - "SQL-backed clinical repository"
   - "reproducible research"
   - "GDPR"
 identifiers:
   - type: doi
     value: "10.6084/m9.figshare.32095435"
-    description: "Figshare DOI for the technical report and accompanying datasets."
+    description: "Figshare DOI for the technical report and accompanying datasets (V11 baseline + V12 second update)."
 preferred-citation:
   type: report
   title: >-
-    Clinical Validation of the Kantesti AI Engine (2.78T) on 15 Anonymised
-    Blood Test Cases: A Pre-Registered, Rubric-Based Benchmark Including
-    Hyperdiagnosis Trap Cases Across Seven Medical Specialties
+    Clinical Validation of the Kantesti AI Engine (2.78T) on 100,000
+    Anonymised Blood Test Cases Across 127 Countries: A Pre-Registered,
+    Rubric-Based, Population-Scale Benchmark — Second Update (V12)
   authors:
     - family-names: "Klein"
       given-names: "Thomas"
@@ -60,6 +70,6 @@ preferred-citation:
     address: "4 Raven Road, Unit 1c3-1100, London E18 1HB, United Kingdom"
   year: 2026
   month: 4
-  number: "V11"
+  number: "V12"
   doi: "10.6084/m9.figshare.32095435"
   url: "https://doi.org/10.6084/m9.figshare.32095435"
