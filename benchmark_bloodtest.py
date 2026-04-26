@@ -1,5 +1,5 @@
 """
-Kantesti AI Engine (2.78T) — Blood Test Benchmark V12 (Second Update)
+Kantesti AI Engine (2.78T) — Blood Test Benchmark V11 (Second Update)
 =======================================================================
 
 Rubric-based evaluation harness for the Kantesti blood test
@@ -9,13 +9,14 @@ so benchmark results match what end-users actually experience.
 
 Update history
 --------------
-* V11 (April 2026, baseline) — 15 hand-curated anonymised cases across
-  seven medical specialties plus two hyperdiagnosis trap cases. Cases
-  were inlined as a Python literal list inside this module.
-* V12 (April 2026, *second update*, this file) — 100,000 anonymised
+* V11 initial (April 2026, baseline) — 15 hand-curated anonymised
+  cases across seven medical specialties plus two hyperdiagnosis trap
+  cases. Cases were inlined as a Python literal list inside this
+  module.
+* V11 Second Update (April 2026, *this file*) — 100,000 anonymised
   cases pulled at run-time from the Kantesti SQL-backed clinical
-  repository. The scoring rubric is byte-identical to V11; only the
-  case loader has been replaced.
+  repository. The scoring rubric is byte-identical to the V11
+  initial release; only the case loader has been replaced.
 
 Design
 ------
@@ -50,7 +51,7 @@ Setup
        export KANTESTI_DB_USER="bench_reader"
        export KANTESTI_DB_PASSWORD="your_db_password"
 4. Run:
-       python benchmark_bloodtest.py                  # full V12 run (100,000 cases)
+       python benchmark_bloodtest.py                  # full Second Update run (100,000 cases)
        python benchmark_bloodtest.py --limit 1000     # quick iteration
        python benchmark_bloodtest.py --lang tr        # Turkish output
        python benchmark_bloodtest.py --sandbox        # no credit consumption
@@ -117,8 +118,9 @@ except ImportError:
 
 
 BRAND = "Kantesti AI Engine (2.78T)"
-SUITE = "Blood Test Benchmark V12 (Second Update — 100K Cohort)"
-VERSION = "V12"
+SUITE = "Blood Test Benchmark V11 (Second Update — 100K Cohort)"
+VERSION = "V11"
+RELEASE = "V11 (Second Update)"
 ENGINE_DISPLAY_NAME = "Kantesti AI Engine (2.78T)"
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -140,19 +142,19 @@ PHASE2_TIMEOUT_SEC   = 120     # slow path / heavy engine fallback
 # ════════════════════════════════════════════════════════════════════════════
 # CLINICAL REPOSITORY (SQL) CONFIG
 # ════════════════════════════════════════════════════════════════════════════
-# The V12 update replaced the V11 hard-coded `CASES = [...]` literal with a
-# parameterised SQL query against the Kantesti clinical repository. The
-# repository holds anonymised, consented blood-test panels with all direct
-# identifiers stripped at write-time (Safe Harbor approach). Access uses a
-# *read-only* role (`bench_reader`) that has no privileges on the identifying
-# tables; the schema enforces this at the database level.
+# The Second Update replaced the original V11 hard-coded `CASES = [...]`
+# literal with a parameterised SQL query against the Kantesti clinical
+# repository. The repository holds anonymised, consented blood-test panels
+# with all direct identifiers stripped at write-time (Safe Harbor approach).
+# Access uses a *read-only* role (`bench_reader`) that has no privileges on
+# the identifying tables; the schema enforces this at the database level.
 KANTESTI_DB_HOST     = os.environ.get("KANTESTI_DB_HOST",     "repo.internal.kantesti.net")
 KANTESTI_DB_PORT     = int(os.environ.get("KANTESTI_DB_PORT", "3306"))
 KANTESTI_DB_NAME     = os.environ.get("KANTESTI_DB_NAME",     "kantesti_clinical_repo")
 KANTESTI_DB_USER     = os.environ.get("KANTESTI_DB_USER",     "")
 KANTESTI_DB_PASSWORD = os.environ.get("KANTESTI_DB_PASSWORD", "")
 
-# Default cohort size for the V12 run.
+# Default cohort size for the Second Update run.
 DEFAULT_COHORT_SIZE = 100_000
 
 # Stratified-random sample size for the *_full.json raw-response dump.
@@ -162,8 +164,8 @@ DEFAULT_COHORT_SIZE = 100_000
 RAW_DUMP_SAMPLE_SIZE = 201
 RAW_DUMP_RNG_SEED    = 20260426
 
-# Frozen V12 cohort SQL. The query is parameterised, read-only, and printed
-# in full at the top of every benchmark run for transparency.
+# Frozen Second-Update cohort SQL. The query is parameterised, read-only,
+# and printed in full at the top of every benchmark run for transparency.
 COHORT_QUERY_SQL = """
 SELECT
     p.case_uid          AS case_id,
@@ -210,12 +212,13 @@ class Case:
     expected_scoring_systems: list[str] = field(default_factory=list)
     clinical_notes: str = ""
     hyperdiagnosis_flags: list[str] = field(default_factory=list)
-    country: str = ""              # ISO-3166-1 alpha-2 code (V12)
-    nationality: str = ""          # localised nationality string (V12)
+    country: str = ""              # ISO-3166-1 alpha-2 code (Second Update)
+    nationality: str = ""          # localised nationality string (Second Update)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CASE LOADER — V12: read 100,000 cases from the Kantesti clinical repository
+# CASE LOADER — Second Update: read 100,000 cases from the Kantesti clinical
+# repository
 # ════════════════════════════════════════════════════════════════════════════
 def _new_db_pool() -> _mysql_pooling.MySQLConnectionPool:
     """Create a small read-only MySQL connection pool.

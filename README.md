@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<h1 align="center">Kantesti AI Engine (2.78T) — Blood Test Benchmark V12</h1>
+<h1 align="center">Kantesti AI Engine (2.78T) — Blood Test Benchmark V11 (Second Update)</h1>
 <h3 align="center"><em>Second Update — 100,000-Patient Cohort Across 127 Countries</em></h3>
 
 <p align="center">
@@ -16,7 +16,7 @@
   <a href="#headline-result"><img src="https://img.shields.io/badge/countries-127-informational" alt="Countries"></a>
 </p>
 
-A **pre-registered, rubric-based clinical benchmark** of the [Kantesti AI Engine (2.78T)](https://www.kantesti.net) on **100,000 anonymised blood test cases** drawn from the Kantesti SQL-backed clinical repository, spanning **127 countries** and **75+ languages**. This V12 release is the **second update** of the Kantesti Blood Test Benchmark suite, extending the earlier V11 proof-of-concept (15 cases) to a population-scale evaluation.
+A **pre-registered, rubric-based clinical benchmark** of the [Kantesti AI Engine (2.78T)](https://www.kantesti.net) on **100,000 anonymised blood test cases** drawn from the Kantesti SQL-backed clinical repository, spanning **127 countries** and **75+ languages**. This is the **Second Update** of the V11 Kantesti Blood Test Benchmark suite, extending the original V11 proof-of-concept (15 cases) to a population-scale evaluation.
 
 > The harness in this repository — including the SQL case loader — is released under the MIT licence. The Kantesti AI Engine itself is a commercial product accessed through its public production API.
 
@@ -27,17 +27,17 @@ A **pre-registered, rubric-based clinical benchmark** of the [Kantesti AI Engine
 | Release | Date | Cohort | Specialties | Countries | Composite |
 |---|---|---:|---:|---:|---:|
 | V11 (initial) | 23 Apr 2026 | 15 cases | 7 + 1 trap bucket | single repo | 0.9912 |
-| **V12 (second update)** | **26 Apr 2026** | **100,000 cases** | **8** | **127** | **0.9980** |
+| **V11 — Second Update** | **26 Apr 2026** | **100,000 cases** | **8** | **127** | **0.9980** |
 
-The V11 release validated the rubric and the engine's behaviour on hand-curated differential-diagnosis pitfalls and hyperdiagnosis traps. The V12 update keeps the rubric **byte-identical** and extends the evaluation to the full anonymised production cohort, sourced through a parameterised SQL query against the Kantesti clinical data warehouse.
+The V11 release validated the rubric and the engine's behaviour on hand-curated differential-diagnosis pitfalls and hyperdiagnosis traps. The Second Update keeps the rubric **byte-identical** and extends the evaluation to the full anonymised production cohort, sourced through a parameterised SQL query against the Kantesti clinical data warehouse.
 
 ---
 
 ## Headline result
 
-On the same rubric that was frozen in source code before the V11 run, the Kantesti AI Engine (2.78T) achieved on the V12 100K cohort:
+On the same rubric that was frozen in source code before the V11 run, the Kantesti AI Engine (2.78T) achieved on the 100K cohort (Second Update):
 
-| Metric | V11 (n=15) | **V12 (n=100,000)** |
+| Metric | V11 initial (n=15) | **V11 Second Update (n=100,000)** |
 |---|---:|---:|
 | **Composite score** | 0.9912 (99.12%) | **0.9980 (99.80%)** |
 | Structural score (mean) | 0.998 | **1.000** |
@@ -48,7 +48,7 @@ On the same rubric that was frozen in source code before the V11 run, the Kantes
 | Trap-subset hyperdiagnosis | 0 / 13 flags | **0 / 87,412 flags** |
 | Engine path = primary | 12 / 15 | **100,000 / 100,000** |
 
-The latency improvement reflects production engine optimisations between V11 and V12; the rubric, the scoring code, and the API endpoint are unchanged.
+The latency improvement reflects production engine optimisations between the original V11 release and the Second Update; the rubric, the scoring code, and the API endpoint are unchanged.
 
 A 201-case sample of full raw engine responses is published in [`results/kantesti_benchmark_20260426_200720_full.json`](results/kantesti_benchmark_20260426_200720_full.json) for inspection.
 
@@ -56,7 +56,7 @@ A 201-case sample of full raw engine responses is published in [`results/kantest
 
 ## Why this benchmark matters
 
-AI-assisted blood test interpretation is increasingly used in consumer and clinical workflows, but reproducible evaluation frameworks tailored to laboratory medicine remain uncommon. The V12 update answers questions that the V11 proof-of-concept could only gesture at:
+AI-assisted blood test interpretation is increasingly used in consumer and clinical workflows, but reproducible evaluation frameworks tailored to laboratory medicine remain uncommon. The Second Update answers questions that the V11 proof-of-concept could only gesture at:
 
 - Does the engine maintain near-ceiling performance at population scale, not just on hand-picked illustrative cases?
 - Is performance consistent across 127 countries and 75+ languages, or does it degrade outside the engine's primary markets?
@@ -79,13 +79,13 @@ C = 0.35 × Structural + 0.55 × Clinical + 0.10 × Latency
 - **Clinical (55%)** — diagnosis keyword recall (70%), scoring-system recall (20%), probability-sum validity in [90, 110] (10%). Trap-subset cases carry a hyperdiagnosis penalty of up to 0.30.
 - **Latency (10%)** — 0.10 if response under 20 s, 0.05 if under 40 s, otherwise 0.
 
-The full rubric is implemented in [`benchmark_bloodtest.py`](benchmark_bloodtest.py) and was committed before the first V11 engine call. **The rubric was not modified for V12** — only the case loader was changed, from a Python literal list (V11) to a parameterised SQL query against the Kantesti clinical repository (V12). See [`Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V12_Technical_Report.pdf`](Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V12_Technical_Report.pdf) for the complete methodology, ethics statement, country breakdown, and discussion.
+The full rubric is implemented in [`benchmark_bloodtest.py`](benchmark_bloodtest.py) and was committed before the first V11 engine call. **The rubric was not modified for the Second Update** — only the case loader was changed, from a Python literal list (V11 initial) to a parameterised SQL query against the Kantesti clinical repository (Second Update). See [`Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V11_Second_Update_Technical_Report.pdf`](Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V11_Second_Update_Technical_Report.pdf) for the complete methodology, ethics statement, country breakdown, and discussion.
 
 ---
 
 ## Cohort coverage
 
-### Specialty distribution (V12, n = 100,000)
+### Specialty distribution (Second Update, n = 100,000)
 
 | Specialty | Cases | Share |
 |---|---:|---:|
@@ -170,7 +170,7 @@ The default SQL query — `SELECT ... FROM anonymised_blood_panels WHERE consent
 ### 4. Run the benchmark
 
 ```bash
-# V12 default: 100,000 cases from SQL
+# Second Update default: 100,000 cases from SQL
 python benchmark_bloodtest.py
 
 # Smaller sample (e.g. n = 1,000) for quick iteration
@@ -190,7 +190,7 @@ Each run emits four artefacts into the working directory:
 - `kantesti_benchmark_<timestamp>.md` — human-readable Markdown report
 - `kantesti_benchmark_<timestamp>.csv` — per-case CSV for downstream analysis
 
-The reference V12 run from 26 April 2026 is preserved under [`results/`](results/).
+The reference Second Update run from 26 April 2026 is preserved under [`results/`](results/).
 
 ---
 
@@ -203,7 +203,7 @@ kantesti-blood-test-benchmark/
 ├── CITATION.cff
 ├── requirements.txt
 ├── benchmark_bloodtest.py
-├── Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V12_Technical_Report.pdf
+├── Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V11_Second_Update_Technical_Report.pdf
 ├── Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V11_Technical_Report.pdf   ← preserved baseline
 └── results/
     ├── kantesti_benchmark_20260426_200720.json
@@ -217,7 +217,7 @@ kantesti-blood-test-benchmark/
 
 ## Data and ethics
 
-The 100,000 cases evaluated in V12 are **anonymised real patient records** drawn from the Kantesti SQL-backed clinical data repository under written informed consent. De-identification is performed at write-time under the Safe Harbor approach: all direct identifiers are removed or replaced before any record reaches the benchmark loader. The benchmark loader queries the repository through a **read-only role** that has no access to identifying tables; the schema enforces this at the database level, not just in application code.
+The 100,000 cases evaluated in the Second Update are **anonymised real patient records** drawn from the Kantesti SQL-backed clinical data repository under written informed consent. De-identification is performed at write-time under the Safe Harbor approach: all direct identifiers are removed or replaced before any record reaches the benchmark loader. The benchmark loader queries the repository through a **read-only role** that has no access to identifying tables; the schema enforces this at the database level, not just in application code.
 
 Processing was carried out in accordance with **GDPR Article 9(2)(j)** and the equivalent UK GDPR provisions. Country information retained in the released artefacts is at the **ISO 3166-1 alpha-2 level only** (e.g. `DE`, `BR`); no sub-national identifiers, postal codes, or facility identifiers appear anywhere in the public release.
 
@@ -241,18 +241,18 @@ A planned V13 follow-up adds per-case multi-run variance estimation (n = 5 per c
 If you use this benchmark or its data, please cite:
 
 ```bibtex
-@techreport{klein2026kantesti_v12,
+@techreport{klein2026kantesti_v11_second_update,
   author      = {Klein, Thomas and Bulut, Julian Emirhan},
   title       = {Clinical Validation of the Kantesti AI Engine (2.78T) on 100,000
                  Anonymised Blood Test Cases Across 127 Countries:
                  A Pre-Registered, Rubric-Based, Population-Scale Benchmark
-                 (Second Update, V12)},
+                 --- V11 Second Update},
   institution = {Kantesti Ltd},
   address     = {London, United Kingdom},
   year        = {2026},
   month       = {April},
   type        = {Technical Report},
-  number      = {V12},
+  number      = {V11 (Second Update)},
   doi         = {10.6084/m9.figshare.32095435},
   url         = {https://doi.org/10.6084/m9.figshare.32095435}
 }
@@ -284,8 +284,8 @@ A `CITATION.cff` file is provided so that GitHub will render a "Cite this reposi
 
 Both authors are employed by and hold equity in Kantesti Ltd. The engine under evaluation is a commercial product of the same organisation. We disclose this openly and mitigate the obvious bias by:
 
-1. Fixing the scoring rubric in source code before the first V11 engine call, and **leaving it byte-identical** for V12.
-2. Publishing the full evaluation harness — including the V12 SQL case loader — under the MIT licence, so any independent researcher can re-execute the run against the same public production endpoint.
+1. Fixing the scoring rubric in source code before the first V11 engine call, and **leaving it byte-identical** for the Second Update.
+2. Publishing the full evaluation harness — including the Second Update SQL case loader — under the MIT licence, so any independent researcher can re-execute the run against the same public production endpoint.
 3. Publishing the aggregated 100K scorecard alongside a stratified random sample (n = 201) of full raw engine responses for inspection.
 
 ---
