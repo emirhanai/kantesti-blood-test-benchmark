@@ -4,17 +4,70 @@
   </a>
 </p>
 
-<h1 align="center">Kantesti Blood-Test Benchmark — V11 (Second Update)</h1>
-<h3 align="center"><em>Automated Technical Benchmark on a 100,000-Case Synthetic Cohort</em></h3>
+<h1 align="center">Kantesti AI Blood Test Benchmark — V12 November Update</h1>
+<h3 align="center"><em>MedQA 94.89% · MedCalc-Bench 87.0% · MedHallu 87.6% · PubMedQA 82.4% — plus the V11 100,000-case synthetic blood-test benchmark</em></h3>
 
 <p align="center">
+  <a href="https://www.kantesti.net/kantesti-ai-blood-test-benchmark/#v12-november-update"><img src="https://img.shields.io/badge/V12-November%20Update-purple" alt="Kantesti AI V12 November Update"></a>
+  <a href="#v12-november-update-15-nov-2026"><img src="https://img.shields.io/badge/MedQA%20(USMLE)-94.89%25-brightgreen" alt="MedQA USMLE accuracy 94.89%"></a>
   <a href="https://doi.org/10.6084/m9.figshare.32095435"><img src="https://img.shields.io/badge/DOI-10.6084%2Fm9.figshare.32095435-blue" alt="DOI"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
-  <a href="#headline-result"><img src="https://img.shields.io/badge/composite-99.80%25-brightgreen" alt="Composite Score"></a>
+  <a href="#headline-result"><img src="https://img.shields.io/badge/V11%20composite-99.80%25-brightgreen" alt="V11 Composite Score"></a>
   <a href="#headline-result"><img src="https://img.shields.io/badge/cohort-100%2C000%20synthetic-success" alt="Synthetic Cohort"></a>
-  <a href="#headline-result"><img src="https://img.shields.io/badge/data-synthetic-lightgrey" alt="Synthetic Data"></a>
 </p>
+
+---
+
+## V12 November Update (15 Nov 2026)
+
+**Kantesti AI v12 November Update** was run on **four public medical AI benchmarks** — MedQA (USMLE), MedCalc-Bench, MedHallu and PubMedQA — on 15 November 2026. Every answer is published in [`v12-november-update/benchmark.zip`](v12-november-update/benchmark.zip) so anyone can check the scores line by line.
+
+📄 **Full write-up:** [Kantesti AI Blood Test Benchmark — V12 November Update](https://www.kantesti.net/kantesti-ai-blood-test-benchmark/#v12-november-update)
+
+| Benchmark | Questions | Answered | Correct | Accuracy |
+|---|---:|---:|---:|---:|
+| **MedQA** (USMLE, 4 options, test set) | 1,273 | 1,273 | 1,208 | **94.89%** |
+| **MedHallu** (pqa_labeled, hallucination detection) | 1,000 | 1,000 | 876 | **87.6%** |
+| **MedCalc-Bench** (test set) | 1,100 | 1,100 | 957 | **87.0%** |
+| **PubMedQA** (expert-labelled test set) | 500 | 500 | 412 | **82.4%** |
+| **Total** | **3,873** | **3,873** | **3,453** | — |
+
+**Breakdowns**
+
+- **MedCalc-Bench by answer kind:** decimal 95.78% (n=640) · integer 76.5% (n=400) · date 63.33% (n=60)
+- **MedHallu by difficulty:** easy 89.78% (n=274) · medium 88.36% (n=318) · hard 85.54% (n=408)
+
+**Method.** Each question was asked once, with the benchmark's own answer options and context, and scored against the benchmark's answer key. Accuracy = correct ÷ answered; no question was left unanswered. These results were run and scored by Kantesti and have not been independently verified or peer-reviewed. They are exam-style accuracies, **not** diagnostic accuracy.
+
+### Raw results: `benchmark.zip`
+
+| File | Content |
+|---|---|
+| [`benchmark.zip`](v12-november-update/benchmark.zip) | Full archive (35 KB), identical to the [kantesti.net download](https://www.kantesti.net/kantesti-ai-blood-test-benchmark/#v12-november-update) |
+| [`summary.md`](v12-november-update/summary.md) / [`summary.json`](v12-november-update/summary.json) | Totals and breakdowns |
+| [`medqa.json`](v12-november-update/medqa.json), [`medcalc.json`](v12-november-update/medcalc.json), [`medhallu.json`](v12-november-update/medhallu.json), [`pubmedqa.json`](v12-november-update/pubmedqa.json) | One JSON line per question: gold answer, model answer, `correct` |
+| [`benchmark.log`](v12-november-update/benchmark.log) | Timestamped run log |
+
+SHA-256 of `benchmark.zip`:
+
+```
+e016c0aa9a02a5b7948ea05fa3cedba3dffb069bfaa6dbac98d473e9b7afad90
+```
+
+Verify it yourself:
+
+```bash
+cd v12-november-update && sha256sum -c benchmark.zip.sha256
+```
+
+```bash
+grep -c '"correct": true' v12-november-update/medqa.json   # 1208 of 1273 lines
+```
+
+---
+
+## V11 — Second Update: 100,000-case synthetic blood-test benchmark
 
 A **pre-registered, rubric-based automated technical benchmark** of the [Kantesti blood-test interpretation engine](https://www.kantesti.net) on **100,000 synthetically generated test cases**, tagged with **127 country labels** and **75+ language labels** to exercise multilingual output formatting. This is the **Second Update** of the V11 Kantesti Blood Test Benchmark suite, extending the original V11 proof-of-concept (15 hand-constructed cases) to a larger synthetic cohort.
 
@@ -30,6 +83,7 @@ A **pre-registered, rubric-based automated technical benchmark** of the [Kantest
 |---|---|---:|---:|---:|---:|
 | V11 (initial) | 23 Apr 2026 | 15 synthetic cases | 7 + 1 trap bucket | — | 0.9912 |
 | **V11 — Second Update** | **26 Apr 2026** | **100,000 synthetic cases** | **8** | **127** | **0.9980** |
+| **V12 — November Update** | **15 Nov 2026** | **3,873 public benchmark questions** | MedQA · MedCalc-Bench · MedHallu · PubMedQA | — | see [V12](#v12-november-update-15-nov-2026) |
 
 The V11 release exercised the rubric on hand-constructed differential-diagnosis pitfalls and over-diagnosis traps. The Second Update keeps the rubric **byte-identical** and extends the evaluation to a larger synthetic cohort.
 
@@ -65,7 +119,7 @@ C = 0.35 × Structural + 0.55 × Clinical-keyword + 0.10 × Latency
 - **Clinical-keyword (55%)** — keyword recall (70%), scoring-system recall (20%), probability-sum validity in [90, 110] (10%). Trap-subset cases carry a hyperdiagnosis penalty of up to 0.30. **This component only checks whether expected terms appear in the output; it does not assess diagnostic correctness and is not a measure of diagnostic accuracy.**
 - **Latency (10%)** — 0.10 if response under 20 s, 0.05 if under 40 s, otherwise 0.
 
-The rubric is implemented in [`benchmark_bloodtest.py`](benchmark_bloodtest.py) and was committed before the first V11 engine call. **It was not modified for the Second Update** — only the cohort size and breadth changed. See the [technical report PDF](Kantesti_Blood_Test_Benchmark_V11_Second_Update_Technical_Report.pdf) for the full methodology and discussion.
+The rubric is implemented in [`benchmark_bloodtest.py`](benchmark_bloodtest.py) and was committed before the first V11 engine call. **It was not modified for the Second Update** — only the cohort size and breadth changed. See the [technical report PDF](Kantesti_AI_Engine_2_78T_Blood_Test_Benchmark_V11_Second_Update_Technical_Report.pdf) for the full methodology and discussion.
 
 ---
 
@@ -192,6 +246,7 @@ This benchmark therefore raises no data-protection obligations of its own, becau
 
 ## Related links
 
+- **V12 November Update (results page):** <https://www.kantesti.net/kantesti-ai-blood-test-benchmark/#v12-november-update>
 - **Figshare (DOI):** <https://doi.org/10.6084/m9.figshare.32095435>
 - **Kantesti website:** <https://www.kantesti.net>
 - **Kantesti API documentation:** <https://www.kantesti.net/docs/en/endpoints/>
